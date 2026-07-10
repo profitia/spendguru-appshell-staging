@@ -618,6 +618,7 @@ input:focus-visible {
   fill: white;
   stroke-width: 2;
   cursor: pointer;
+  pointer-events: none;
   transition: opacity 180ms ease, stroke-width 180ms ease;
 }
 
@@ -625,6 +626,11 @@ input:focus-visible {
   fill: transparent;
   stroke: transparent;
   cursor: pointer;
+}
+
+.chart-hit-area:focus,
+.chart-hit-area:focus-visible {
+  outline: none;
 }
 
 .chart-hit-area-accuracy {
@@ -653,6 +659,36 @@ input:focus-visible {
 
 .chart-point.is-selected {
   stroke-width: 2.75;
+}
+
+.chart-selection-ring {
+  fill: color-mix(in srgb, var(--panel) 92%, white 8%);
+  stroke-width: 2.25;
+  pointer-events: none;
+}
+
+.chart-selection-ring.historical {
+  stroke: #0f766e;
+}
+
+.chart-selection-ring.forecast-central {
+  stroke: #ea580c;
+}
+
+.chart-selection-ring.forecast-upper {
+  stroke: #7c3aed;
+}
+
+.chart-selection-ring.forecast-lower {
+  stroke: #2563eb;
+}
+
+.chart-selection-ring.forecast-accuracy.is-positive {
+  stroke: #0f766e;
+}
+
+.chart-selection-ring.forecast-accuracy.is-negative {
+  stroke: #92400e;
 }
 
 .chart-accuracy-marker {

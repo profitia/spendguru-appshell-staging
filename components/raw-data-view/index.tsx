@@ -947,8 +947,9 @@ function ChartPanel({
   const [activePoint, setActivePoint] = useState<TimeSeriesViewerPoint | null>(null)
   const [activeTooltip, setActiveTooltip] = useState<TooltipSurface | null>(null)
   const [activePreset, setActivePreset] = useState<RangePreset>('ALL')
-  const [selectedPointKey, setSelectedPointKey] = useState<string | null>(null)
-  const [selectedPoint, setSelectedPoint] = useState<TimeSeriesViewerPoint | null>(null)
+  const [selectedSurfaceKey, setSelectedSurfaceKey] = useState<string | null>(null)
+  const [selectedSurface, setSelectedSurface] = useState<TooltipSurface | TimeSeriesViewerPoint | null>(null)
+  const [selectedSurfaceVariant, setSelectedSurfaceVariant] = useState<TooltipVariant | null>(null)
   const [armedAccuracyKey, setArmedAccuracyKey] = useState<string | null>(null)
   const [zoomRange, setZoomRange] = useState<VisibleRange | null>(null)
   const [dragSelection, setDragSelection] = useState<DragSelection>(null)
@@ -963,12 +964,14 @@ function ChartPanel({
   const armAccuracyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const chartLayout = resolveChartLayout(viewportWidth, isTouchInput)
   const useCompactTooltipRail = viewportWidth <= 420
+  const pinnedSurfaceKey = selectedSurface?.key ?? selectedSurfaceKey
 
   useEffect(() => {
     setActivePreset('ALL')
     setZoomRange(null)
-    setSelectedPointKey(null)
-    setSelectedPoint(null)
+    setSelectedSurfaceKey(null)
+    setSelectedSurface(null)
+    setSelectedSurfaceVariant(null)
     setActivePoint(null)
     setActiveTooltip(null)
     setArmedAccuracyKey(null)
@@ -1019,8 +1022,9 @@ function ChartPanel({
       clearHideTimeout()
       setActivePoint(null)
       setActiveTooltip(null)
-      setSelectedPointKey(null)
-      setSelectedPoint(null)
+      setSelectedSurfaceKey(null)
+      setSelectedSurface(null)
+      setSelectedSurfaceVariant(null)
       setArmedAccuracyKey(null)
     }
 
@@ -1044,7 +1048,7 @@ function ChartPanel({
       return
     }
 
-    const displayTooltip = activeTooltip ?? activePoint ?? selectedPoint
+    const displayTooltip = selectedSurface ?? activeTooltip ?? activePoint
 
     if (!displayTooltip) {
       setTooltipPosition(null)
@@ -1109,10 +1113,10 @@ function ChartPanel({
         placement: selectedCandidate.placement,
       }
     })
-  }, [isLoading, payload, activeTooltip, activePoint, selectedPoint, hiddenItems, activePreset, zoomRange, chartLayout, useCompactTooltipRail])
+  }, [isLoading, payload, selectedSurface, activeTooltip, activePoint, hiddenItems, activePreset, zoomRange, chartLayout, useCompactTooltipRail])
 
   useEffect(() => {
-    if (!activePoint && !activeTooltip && !selectedPoint) {
+    if (!activePoint && !activeTooltip && !selectedSurface) {
       return
     }
 
@@ -1126,22 +1130,22 @@ function ChartPanel({
       clearHideTimeout()
       setActivePoint(null)
       setActiveTooltip(null)
-      setSelectedPointKey(null)
-      setSelectedPoint(null)
+      setSelectedSurfaceKey(null)
+      setSelectedSurface(null)
       setArmedAccuracyKey(null)
     }
 
     window.addEventListener('pointerdown', handlePointerDown)
     return () => window.removeEventListener('pointerdown', handlePointerDown)
-  }, [activePoint, activeTooltip, selectedPoint])
+  }, [activePoint, activeTooltip, selectedSurface])
 
   useEffect(() => {
-    if ((!chartLayout.isTouch && !useCompactTooltipRail) || !tooltipRef.current || (!activePoint && !activeTooltip && !selectedPoint)) {
+    if ((!chartLayout.isTouch && !useCompactTooltipRail) || !tooltipRef.current || (!activePoint && !activeTooltip && !selectedSurface)) {
       return
     }
 
     tooltipRef.current.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [chartLayout.isTouch, useCompactTooltipRail, activePoint, activeTooltip, selectedPoint])
+  }, [chartLayout.isTouch, useCompactTooltipRail, activePoint, activeTooltip, selectedSurface])
 
   if (isLoading) {
     return (
@@ -1196,7 +1200,7 @@ function ChartPanel({
   const accuracyMarkers = showForecastAccuracy && !hiddenItems.includes('forecast-accuracy')
     ? buildAccuracyMarkers(locale, visibleSeries, payload.benchmarkCode ?? payload.sourceInfo?.benchmarkCode ?? null)
     : []
-  const displayTooltip = activeTooltip ?? activePoint ?? selectedPoint
+  const displayTooltip = selectedSurface ?? activeTooltip ?? activePoint
   const tooltipVariant = displayTooltip ? resolveSurfaceVariant(displayTooltip) : null
   const tooltipCard = displayTooltip ? buildTooltipCardModel(locale, displayTooltip, payload) : null
   const sourceLine = buildSourceLine(locale, payload)
@@ -1237,6 +1241,10 @@ function ChartPanel({
   }
 
   function handlePointEnter(point: TimeSeriesViewerPoint) {
+    if (pinnedSurfaceKey) {
+      return
+    }
+
     if (armAccuracyTimeoutRef.current) {
       clearTimeout(armAccuracyTimeoutRef.current)
       armAccuracyTimeoutRef.current = null
@@ -1249,6 +1257,10 @@ function ChartPanel({
   }
 
   function handlePointLeave(pointKey: string) {
+    if (pinnedSurfaceKey) {
+      return
+    }
+
     clearHideTimeout()
     hideTooltipTimeoutRef.current = setTimeout(() => {
       setActivePoint((current) => current?.key === pointKey ? null : current)
@@ -1256,6 +1268,10 @@ function ChartPanel({
   }
 
   function handleTooltipSurfaceEnter(surface: TooltipSurface) {
+    if (pinnedSurfaceKey) {
+      return
+    }
+
     if (armAccuracyTimeoutRef.current) {
       clearTimeout(armAccuracyTimeoutRef.current)
       armAccuracyTimeoutRef.current = null
@@ -1268,6 +1284,10 @@ function ChartPanel({
   }
 
   function handleTooltipSurfaceLeave(surfaceKey: string) {
+    if (pinnedSurfaceKey) {
+      return
+    }
+
     if (armAccuracyTimeoutRef.current) {
       clearTimeout(armAccuracyTimeoutRef.current)
       armAccuracyTimeoutRef.current = null
@@ -1281,6 +1301,10 @@ function ChartPanel({
   }
 
   function armAccuracyMarker(marker: AccuracyMarker) {
+    if (pinnedSurfaceKey) {
+      return
+    }
+
     if (armAccuracyTimeoutRef.current) {
       clearTimeout(armAccuracyTimeoutRef.current)
     }
@@ -1288,8 +1312,9 @@ function ChartPanel({
     clearHideTimeout()
     setArmedAccuracyKey(marker.key)
     setActivePoint(null)
-    setSelectedPointKey(null)
-    setSelectedPoint(null)
+    setSelectedSurfaceKey(null)
+    setSelectedSurface(null)
+    setSelectedSurfaceVariant(null)
     setActiveTooltip(null)
     armAccuracyTimeoutRef.current = setTimeout(() => {
       setActiveTooltip(marker)
@@ -1306,9 +1331,10 @@ function ChartPanel({
     clearHideTimeout()
     setArmedAccuracyKey(marker.key)
     setActivePoint(null)
-    setSelectedPointKey(null)
-    setSelectedPoint(null)
-    setActiveTooltip(marker)
+    setActiveTooltip(null)
+    setSelectedSurfaceKey(marker.key)
+    setSelectedSurface(marker)
+    setSelectedSurfaceVariant('forecast-accuracy')
   }
 
   function handleRangePreset(preset: RangePreset) {
@@ -1326,10 +1352,30 @@ function ChartPanel({
     hideTooltipTimeoutRef.current = setTimeout(() => {
       setActivePoint(null)
       setActiveTooltip(null)
-      setSelectedPointKey(null)
-      setSelectedPoint(null)
+      setSelectedSurfaceKey(null)
+      setSelectedSurface(null)
+      setSelectedSurfaceVariant(null)
       setArmedAccuracyKey(null)
     }, TOOLTIP_HIDE_DELAY_MS)
+  }
+
+  function clearPinnedSelection() {
+    clearHideTimeout()
+    setSelectedSurfaceKey(null)
+    setSelectedSurface(null)
+    setSelectedSurfaceVariant(null)
+    setActivePoint(null)
+    setActiveTooltip(null)
+    setArmedAccuracyKey(null)
+  }
+
+  function isSelectedSeriesPoint(point: TimeSeriesViewerPoint, kind: TimeSeriesViewerSeries['kind']) {
+    if (!selectedSurface || selectedSurfaceVariant !== kind || !('detailModel' in selectedSurface)) {
+      return false
+    }
+
+    return selectedSurface.key === point.key
+      || (selectedSurface.recordId === point.recordId && selectedSurface.date === point.date)
   }
 
   function handleChartMouseDown(event: React.MouseEvent<SVGSVGElement>) {
@@ -1420,6 +1466,15 @@ function ChartPanel({
           className="chart-svg"
           role="img"
           aria-label="Time series chart"
+          onClick={(event) => {
+            const target = event.target as Element
+
+            if (target.closest('.chart-hit-area')) {
+              return
+            }
+
+            clearPinnedSelection()
+          }}
           onMouseDown={handleChartMouseDown}
           onMouseMove={handleChartMouseMove}
           onMouseUp={commitZoomSelection}
@@ -1479,7 +1534,8 @@ function ChartPanel({
             <g key={entry.id} className="chart-series-layer" style={{ animationDelay: `${index * 60}ms` }}>
               {polyline ? <polyline points={polyline} className={`chart-line ${legendClass(entry.kind)}`} /> : null}
               {entry.points.filter((point) => point.value !== null).map((point) => {
-                const showMarker = point.anchor || activePoint?.key === point.key || selectedPointKey === point.key
+                const isSelected = isSelectedSeriesPoint(point, entry.kind)
+                const showMarker = point.anchor || activePoint?.key === point.key || isSelected
 
                 return (
                   <g key={point.key}>
@@ -1488,35 +1544,50 @@ function ChartPanel({
                       cy={pointY(point.value)}
                       r={13}
                       className="chart-hit-area"
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => event.stopPropagation()}
                       onMouseEnter={() => handlePointEnter(point)}
                       onMouseLeave={() => handlePointLeave(point.key)}
                       onFocus={() => handlePointEnter(point)}
                       onBlur={() => handlePointLeave(point.key)}
-                      onClick={() => {
-                        setSelectedPointKey(point.key)
-                        setSelectedPoint(point)
-                        setActivePoint(point)
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        setSelectedSurfaceKey(point.key)
+                        setSelectedSurface(point)
+                        setSelectedSurfaceVariant(entry.kind)
+                        setActivePoint(null)
                         setActiveTooltip(null)
+                        setArmedAccuracyKey(null)
                       }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
                           event.preventDefault()
-                          setSelectedPointKey(point.key)
-                          setSelectedPoint(point)
-                          setActivePoint(point)
+                          setSelectedSurfaceKey(point.key)
+                          setSelectedSurface(point)
+                          setSelectedSurfaceVariant(entry.kind)
+                          setActivePoint(null)
                           setActiveTooltip(null)
+                          setArmedAccuracyKey(null)
                         }
                       }}
                       role="button"
                       tabIndex={0}
                       aria-label={`${formatSeriesLabel(locale, entry.kind)} ${formatDate(locale, point.date)} ${formatPrimaryValue(locale, point.value, point.detailModel.unit, point.detailModel.currency)}`}
                     />
+                    {isSelected ? (
+                      <circle
+                        cx={pointX(point.date)}
+                        cy={pointY(point.value)}
+                        r={10}
+                        className={`chart-selection-ring ${legendClass(entry.kind)}`}
+                      />
+                    ) : null}
                     {showMarker ? (
                       <circle
                         cx={pointX(point.date)}
                         cy={pointY(point.value)}
                         r={point.anchor ? 4.5 : 3}
-                        className={`chart-point ${legendClass(entry.kind)}${point.anchor ? ' is-anchor' : ''}${selectedPointKey === point.key ? ' is-selected' : ''}`}
+                        className={`chart-point ${legendClass(entry.kind)}${point.anchor ? ' is-anchor' : ''}${isSelected ? ' is-selected' : ''}`}
                       />
                     ) : null}
                   </g>
@@ -1532,7 +1603,8 @@ function ChartPanel({
             chartLayout.paddingTop + ACCURACY_MARKER_TOP_CLEARANCE,
             Math.min(unclampedMarkerY, axisY - ACCURACY_MARKER_AXIS_CLEARANCE),
           )
-          const isArmed = armedAccuracyKey === marker.key || activeTooltip?.key === marker.key
+          const isSelected = selectedSurfaceVariant === 'forecast-accuracy' && pinnedSurfaceKey === marker.key
+          const isArmed = armedAccuracyKey === marker.key || activeTooltip?.key === marker.key || isSelected
 
           return (
             <g key={marker.key} className={`chart-accuracy-layer${isArmed ? ' is-armed' : ''}`}>
@@ -1541,11 +1613,16 @@ function ChartPanel({
                 cy={markerY - 2}
                 r={22}
                 className="chart-hit-area chart-hit-area-accuracy"
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
                 onMouseEnter={() => armAccuracyMarker(marker)}
                 onMouseLeave={() => handleTooltipSurfaceLeave(marker.key)}
                 onFocus={() => armAccuracyMarker(marker)}
                 onBlur={() => handleTooltipSurfaceLeave(marker.key)}
-                onClick={() => activateAccuracyMarker(marker)}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  activateAccuracyMarker(marker)
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault()
@@ -1556,6 +1633,14 @@ function ChartPanel({
                 tabIndex={0}
                 aria-label={`${formatSeriesLabel(locale, 'forecast-accuracy')} ${formatDate(locale, marker.date)} ${formatSignedDiff(locale, marker.diff)}`}
               />
+              {isSelected ? (
+                <circle
+                  cx={pointX(marker.date)}
+                  cy={markerY - 2}
+                  r={12}
+                  className={`chart-selection-ring forecast-accuracy ${marker.diff >= 0 ? 'is-positive' : 'is-negative'}`}
+                />
+              ) : null}
               <text
                 x={pointX(marker.date)}
                 y={markerY}
