@@ -48,6 +48,31 @@ type AccuracyMarker = {
   variant: 'forecast-accuracy'
 }
 type TooltipPlacement = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left'
+type CachedSeriesEntry = {
+  response: SeriesResponse
+  payload: TimeSeriesViewerPayload
+  cachedAt: number
+}
+
+type ClientSeriesProfiling = {
+  componentName: string
+  componentCode: string | null
+  showForecast: boolean
+  source: 'network' | 'client-cache' | 'aborted'
+  requestDispatchMs: number
+  networkMs: number
+  responseParseMs: number
+  adapterMs: number
+  commitMs: number
+  firstPaintMs: number
+  totalInteractionMs: number
+  serverTotalMs: number | null
+}
+
+type RawDataViewProfiler = {
+  latest: ClientSeriesProfiling | null
+  history: ClientSeriesProfiling[]
+}
 
 type SearchableSelectOption = {
   value: string
@@ -64,7 +89,77 @@ const TOOLTIP_WIDTH = 300
 const TOOLTIP_OFFSET = 20
 const TOOLTIP_SURFACE_PADDING = 12
 const TOOLTIP_HIDE_DELAY_MS = 180
+const ACCURACY_TOOLTIP_ARM_DELAY_MS = 140
 const RANGE_PRESETS: RangePreset[] = ['3M', '6M', '1Y', '3Y', '5Y', 'ALL']
+const CLIENT_SERIES_CACHE_TTL_MS = 30_000
+
+type ChartLayout = {
+  width: number
+  height: number
+  paddingTop: number
+  paddingRight: number
+  paddingBottom: number
+  paddingLeft: number
+  dateTickTarget: number
+  valueTickCount: number
+  isTouch: boolean
+}
+
+function resolveChartLayout(viewportWidth: number, isTouchInput: boolean): ChartLayout {
+  if (viewportWidth <= 420) {
+    return {
+      width: 620,
+      height: 430,
+      paddingTop: 20,
+      paddingRight: 16,
+      paddingBottom: 84,
+      paddingLeft: 136,
+      dateTickTarget: 3,
+      valueTickCount: 4,
+      isTouch: isTouchInput,
+    }
+  }
+
+  if (viewportWidth <= 768) {
+    return {
+      width: 700,
+      height: 430,
+      paddingTop: 20,
+      paddingRight: 18,
+      paddingBottom: 80,
+      paddingLeft: 132,
+      dateTickTarget: 4,
+      valueTickCount: 4,
+      isTouch: isTouchInput,
+    }
+  }
+
+  if (viewportWidth <= 1100) {
+    return {
+      width: 860,
+      height: 390,
+      paddingTop: 24,
+      paddingRight: 24,
+      paddingBottom: 58,
+      paddingLeft: 108,
+      dateTickTarget: 5,
+      valueTickCount: 5,
+      isTouch: isTouchInput,
+    }
+  }
+
+  return {
+    width: 980,
+    height: 400,
+    paddingTop: 26,
+    paddingRight: 28,
+    paddingBottom: 54,
+    paddingLeft: 92,
+    dateTickTarget: 7,
+    valueTickCount: 5,
+    isTouch: isTouchInput,
+  }
+}
 
 function findLastDateOnOrBefore(dates: string[], threshold: Date) {
   for (let index = dates.length - 1; index >= 0; index -= 1) {
@@ -205,6 +300,48 @@ function replaceLocaleInPath(pathname: string, nextLocale: Locale) {
   }
 
   return `/${nextLocale}/${segments.join('/')}`
+}
+
+function buildClientSeriesCacheKey(locale: Locale, componentName: string, componentCode: string, showForecast: boolean) {
+  return JSON.stringify({ locale, componentName, componentCode: componentCode || null, showForecast })
+}
+
+function getRawDataViewProfiler() {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const profilerWindow = window as Window & { __rawDataViewProfile?: RawDataViewProfiler }
+
+  if (!profilerWindow.__rawDataViewProfile) {
+    profilerWindow.__rawDataViewProfile = {
+      latest: null,
+      history: [],
+    }
+  }
+
+  return profilerWindow.__rawDataViewProfile
+}
+
+function recordRawDataViewProfile(sample: ClientSeriesProfiling) {
+  const profiler = getRawDataViewProfiler()
+
+  if (!profiler) {
+    return
+  }
+
+  profiler.latest = sample
+  profiler.history = [sample, ...profiler.history].slice(0, 20)
+}
+
+function toUiLoadErrorMessage(error: unknown, fallbackMessage: string, timeoutMessage: string) {
+  const message = error instanceof Error ? error.message.toLowerCase() : ''
+
+  if (message.includes('timeout') || message.includes('timed out')) {
+    return timeoutMessage
+  }
+
+  return fallbackMessage
 }
 
 function SearchableSelect({
@@ -455,7 +592,7 @@ function resolveTooltipPoint(surface: TooltipSurface | TimeSeriesViewerPoint, lo
       primaryLabel: null,
       interval: surface.detailModel.scenarioType !== 'historical' && surface.detailModel.forecastLower !== null && surface.detailModel.forecastUpper !== null
         ? {
-            label: locale === 'pl' ? 'Przedział prognozy' : 'Forecast interval',
+            label: locale === 'pl' ? 'Prognoza' : 'Forecast',
             lowerValue: formatNumber(locale, surface.detailModel.forecastLower),
             upperValue: formatNumber(locale, surface.detailModel.forecastUpper),
           }
@@ -518,12 +655,12 @@ function uniqueSortedDates(series: TimeSeriesViewerSeries[]) {
     .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
 }
 
-function buildDateTicks(locale: Locale, dates: string[]) {
+function buildDateTicks(locale: Locale, dates: string[], targetCount: number) {
   if (dates.length === 0) {
     return []
   }
 
-  const step = Math.max(1, Math.ceil(dates.length / 6))
+  const step = Math.max(1, Math.ceil(dates.length / Math.max(targetCount, 2)))
 
   return dates
     .filter((_, index) => index % step === 0 || index === dates.length - 1)
@@ -534,7 +671,7 @@ function buildDateTicks(locale: Locale, dates: string[]) {
     }))
 }
 
-function buildValueTicks(locale: Locale, values: number[]) {
+function buildValueTicks(locale: Locale, values: number[], tickCount: number) {
   if (values.length === 0) {
     return []
   }
@@ -546,8 +683,10 @@ function buildValueTicks(locale: Locale, values: number[]) {
     return [{ value: minimum, label: formatNumber(locale, minimum), offset: 0 }]
   }
 
-  return Array.from({ length: 5 }, (_, index) => {
-    const ratio = index / 4
+  const safeTickCount = Math.max(tickCount, 2)
+
+  return Array.from({ length: safeTickCount }, (_, index) => {
+    const ratio = index / (safeTickCount - 1)
     const value = minimum + (maximum - minimum) * ratio
 
     return {
@@ -681,21 +820,21 @@ function buildCountryBadge(locale: Locale, country: string | null, description: 
   return null
 }
 
-function clampChartX(value: number) {
-  return Math.max(CHART_PADDING_LEFT, Math.min(CHART_WIDTH - CHART_PADDING_RIGHT, value))
+function clampChartX(value: number, layout: ChartLayout) {
+  return Math.max(layout.paddingLeft, Math.min(layout.width - layout.paddingRight, value))
 }
 
-function chartXFromClientX(clientX: number, rect: DOMRect) {
+function chartXFromClientX(clientX: number, rect: DOMRect, layout: ChartLayout) {
   const ratio = (clientX - rect.left) / rect.width
-  return clampChartX(ratio * CHART_WIDTH)
+  return clampChartX(ratio * layout.width, layout)
 }
 
-function dateFromChartX(x: number, dates: string[]) {
+function dateFromChartX(x: number, dates: string[], layout: ChartLayout) {
   if (dates.length === 0) {
     return null
   }
 
-  const ratio = (x - CHART_PADDING_LEFT) / (CHART_WIDTH - CHART_PADDING_LEFT - CHART_PADDING_RIGHT)
+  const ratio = (x - layout.paddingLeft) / (layout.width - layout.paddingLeft - layout.paddingRight)
   const index = Math.max(0, Math.min(dates.length - 1, Math.round(ratio * (dates.length - 1))))
   return dates[index] ?? null
 }
@@ -705,6 +844,7 @@ function buildPolylinePoints(
   minimum: number,
   maximum: number,
   pointX: (date: string) => number,
+  layout: ChartLayout,
 ) {
   const validPoints = points.filter((point) => point.value !== null)
 
@@ -717,13 +857,13 @@ function buildPolylinePoints(
   return validPoints
     .map((point) => {
       const x = pointX(point.date)
-      const y = CHART_HEIGHT - CHART_PADDING_BOTTOM - (((point.value ?? minimum) - minimum) / range) * (CHART_HEIGHT - CHART_PADDING_TOP - CHART_PADDING_BOTTOM)
+      const y = layout.height - layout.paddingBottom - (((point.value ?? minimum) - minimum) / range) * (layout.height - layout.paddingTop - layout.paddingBottom)
       return `${x},${y}`
     })
     .join(' ')
 }
 
-function buildPlotGeometry(series: TimeSeriesViewerSeries[]) {
+function buildPlotGeometry(series: TimeSeriesViewerSeries[], layout: ChartLayout) {
   const allDates = Array.from(new Set(series.flatMap((entry) => entry.points.map((point) => point.date))))
     .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
   const allValues = series.flatMap((entry) => entry.points.map((point) => point.value).filter((value): value is number => value !== null))
@@ -734,11 +874,11 @@ function buildPlotGeometry(series: TimeSeriesViewerSeries[]) {
   const valueRange = maximum - minimum || 1
 
   function pointX(date: string) {
-    return CHART_PADDING_LEFT + ((dateIndex.get(date) ?? 0) / dateDenominator) * (CHART_WIDTH - CHART_PADDING_LEFT - CHART_PADDING_RIGHT)
+    return layout.paddingLeft + ((dateIndex.get(date) ?? 0) / dateDenominator) * (layout.width - layout.paddingLeft - layout.paddingRight)
   }
 
   function pointY(value: number | null) {
-    return CHART_HEIGHT - CHART_PADDING_BOTTOM - (((value ?? minimum) - minimum) / valueRange) * (CHART_HEIGHT - CHART_PADDING_TOP - CHART_PADDING_BOTTOM)
+    return layout.height - layout.paddingBottom - (((value ?? minimum) - minimum) / valueRange) * (layout.height - layout.paddingTop - layout.paddingBottom)
   }
 
   return {
@@ -775,6 +915,8 @@ function ChartPanel({
   payload,
   emptyMessage,
   isLoading,
+  loadingTitle,
+  loadingHint,
   resetZoomLabel,
   sourceLabel,
   showForecastAccuracy,
@@ -784,6 +926,8 @@ function ChartPanel({
   payload: TimeSeriesViewerPayload | null
   emptyMessage: string
   isLoading: boolean
+  loadingTitle: string
+  loadingHint: string
   resetZoomLabel: string
   sourceLabel: string
   showForecastAccuracy: boolean
@@ -794,14 +938,20 @@ function ChartPanel({
   const [activePreset, setActivePreset] = useState<RangePreset>('ALL')
   const [selectedPointKey, setSelectedPointKey] = useState<string | null>(null)
   const [selectedPoint, setSelectedPoint] = useState<TimeSeriesViewerPoint | null>(null)
+  const [armedAccuracyKey, setArmedAccuracyKey] = useState<string | null>(null)
   const [zoomRange, setZoomRange] = useState<VisibleRange | null>(null)
   const [dragSelection, setDragSelection] = useState<DragSelection>(null)
   const [hiddenItems, setHiddenItems] = useState<VisibilityKey[]>([])
   const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number; placement: TooltipPlacement } | null>(null)
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === 'undefined' ? 1440 : window.innerWidth)
+  const [isTouchInput, setIsTouchInput] = useState(() => typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches)
   const svgRef = useRef<SVGSVGElement | null>(null)
   const chartSurfaceRef = useRef<HTMLDivElement | null>(null)
   const tooltipRef = useRef<HTMLDivElement | null>(null)
   const hideTooltipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const armAccuracyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const chartLayout = resolveChartLayout(viewportWidth, isTouchInput)
+  const useCompactTooltipRail = viewportWidth <= 420
 
   useEffect(() => {
     setActivePreset('ALL')
@@ -810,6 +960,7 @@ function ChartPanel({
     setSelectedPoint(null)
     setActivePoint(null)
     setActiveTooltip(null)
+    setArmedAccuracyKey(null)
     setHiddenItems([])
     setTooltipPosition(null)
   }, [payload?.benchmarkCode, payload?.title])
@@ -819,6 +970,32 @@ function ChartPanel({
       if (hideTooltipTimeoutRef.current) {
         clearTimeout(hideTooltipTimeoutRef.current)
       }
+
+      if (armAccuracyTimeoutRef.current) {
+        clearTimeout(armAccuracyTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    const pointerMedia = window.matchMedia('(pointer: coarse)')
+
+    function updateResponsiveState() {
+      setViewportWidth(window.innerWidth)
+      setIsTouchInput(pointerMedia.matches)
+    }
+
+    updateResponsiveState()
+    window.addEventListener('resize', updateResponsiveState)
+    pointerMedia.addEventListener?.('change', updateResponsiveState)
+
+    return () => {
+      window.removeEventListener('resize', updateResponsiveState)
+      pointerMedia.removeEventListener?.('change', updateResponsiveState)
     }
   }, [])
 
@@ -833,6 +1010,7 @@ function ChartPanel({
       setActiveTooltip(null)
       setSelectedPointKey(null)
       setSelectedPoint(null)
+      setArmedAccuracyKey(null)
     }
 
     window.addEventListener('keydown', handleWindowKeyDown)
@@ -840,6 +1018,11 @@ function ChartPanel({
   }, [])
 
   useEffect(() => {
+    if (chartLayout.isTouch || useCompactTooltipRail) {
+      setTooltipPosition(null)
+      return
+    }
+
     if (isLoading || !payload || payload.series.every((entry) => entry.points.length === 0)) {
       setTooltipPosition(null)
       return
@@ -865,15 +1048,15 @@ function ChartPanel({
     const presetRange = resolvePresetRange(historicalDates, forecastDates, activePreset)
     const effectiveRange = zoomRange ?? presetRange
     const visibleSeries = filterSeriesToRange(filteredSeries, effectiveRange)
-    const { pointX, pointY } = buildPlotGeometry(visibleSeries)
+    const { pointX, pointY } = buildPlotGeometry(visibleSeries, chartLayout)
     const anchorX = pointX(displayTooltip.date)
     const anchorValue = ('detailModel' in displayTooltip || isAccuracySurface(displayTooltip)) ? displayTooltip.value : null
     const anchorY = pointY(anchorValue)
     const tooltipRect = tooltipRef.current.getBoundingClientRect()
     const surfaceRect = chartSurfaceRef.current.getBoundingClientRect()
     const svgRect = svgRef.current.getBoundingClientRect()
-    const relativeAnchorX = svgRect.left - surfaceRect.left + (anchorX / CHART_WIDTH) * svgRect.width
-    const relativeAnchorY = svgRect.top - surfaceRect.top + (anchorY / CHART_HEIGHT) * svgRect.height
+    const relativeAnchorX = svgRect.left - surfaceRect.left + (anchorX / chartLayout.width) * svgRect.width
+    const relativeAnchorY = svgRect.top - surfaceRect.top + (anchorY / chartLayout.height) * svgRect.height
 
     const candidates: Array<{ placement: TooltipPlacement; left: number; top: number }> = [
       { placement: 'top-right', left: relativeAnchorX + TOOLTIP_OFFSET, top: relativeAnchorY - tooltipRect.height - TOOLTIP_OFFSET },
@@ -899,12 +1082,55 @@ function ChartPanel({
       Math.min(selectedCandidate.top, surfaceRect.height - tooltipRect.height - TOOLTIP_SURFACE_PADDING),
     )
 
-    setTooltipPosition({
-      left: clampedLeft,
-      top: clampedTop,
-      placement: selectedCandidate.placement,
+    setTooltipPosition((current) => {
+      if (
+        current
+        && current.left === clampedLeft
+        && current.top === clampedTop
+        && current.placement === selectedCandidate.placement
+      ) {
+        return current
+      }
+
+      return {
+        left: clampedLeft,
+        top: clampedTop,
+        placement: selectedCandidate.placement,
+      }
     })
-  }, [isLoading, payload, activeTooltip, activePoint, selectedPoint, hiddenItems, activePreset, zoomRange])
+  }, [isLoading, payload, activeTooltip, activePoint, selectedPoint, hiddenItems, activePreset, zoomRange, chartLayout, useCompactTooltipRail])
+
+  useEffect(() => {
+    if (!activePoint && !activeTooltip && !selectedPoint) {
+      return
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node
+
+      if (chartSurfaceRef.current?.contains(target) || tooltipRef.current?.contains(target)) {
+        return
+      }
+
+      clearHideTimeout()
+      setActivePoint(null)
+      setActiveTooltip(null)
+      setSelectedPointKey(null)
+      setSelectedPoint(null)
+      setArmedAccuracyKey(null)
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown)
+    return () => window.removeEventListener('pointerdown', handlePointerDown)
+  }, [activePoint, activeTooltip, selectedPoint])
+
+  useEffect(() => {
+    if ((!chartLayout.isTouch && !useCompactTooltipRail) || !tooltipRef.current || (!activePoint && !activeTooltip && !selectedPoint)) {
+      return
+    }
+
+    tooltipRef.current.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [chartLayout.isTouch, useCompactTooltipRail, activePoint, activeTooltip, selectedPoint])
 
   if (isLoading) {
     return (
@@ -925,8 +1151,10 @@ function ChartPanel({
                 <span key={`grid-${index}`} className="chart-skeleton-grid-line" />
               ))}
             </div>
-            <div className="chart-skeleton-trace chart-skeleton-trace-historical" />
-            <div className="chart-skeleton-trace chart-skeleton-trace-forecast" />
+            <div className="chart-skeleton-copy">
+              <strong>{loadingTitle}</strong>
+              <span>{loadingHint}</span>
+            </div>
           </div>
         </div>
       </section>
@@ -951,9 +1179,9 @@ function ChartPanel({
   const visibleSeries = filterSeriesToRange(filteredSeries, effectiveRange)
   const visibleDates = uniqueSortedDates(visibleSeries)
   const visibleValues = visibleSeries.flatMap((entry) => entry.points.map((point) => point.value).filter((value): value is number => value !== null))
-  const { minimum, maximum, pointX, pointY } = buildPlotGeometry(visibleSeries)
-  const xTicks = buildDateTicks(locale, visibleDates)
-  const yTicks = buildValueTicks(locale, visibleValues)
+  const { minimum, maximum, pointX, pointY } = buildPlotGeometry(visibleSeries, chartLayout)
+  const xTicks = buildDateTicks(locale, visibleDates, chartLayout.dateTickTarget)
+  const yTicks = buildValueTicks(locale, visibleValues, chartLayout.valueTickCount)
   const accuracyMarkers = showForecastAccuracy && !hiddenItems.includes('forecast-accuracy')
     ? buildAccuracyMarkers(locale, visibleSeries, payload.benchmarkCode ?? payload.sourceInfo?.benchmarkCode ?? null)
     : []
@@ -998,6 +1226,12 @@ function ChartPanel({
   }
 
   function handlePointEnter(point: TimeSeriesViewerPoint) {
+    if (armAccuracyTimeoutRef.current) {
+      clearTimeout(armAccuracyTimeoutRef.current)
+      armAccuracyTimeoutRef.current = null
+    }
+
+    setArmedAccuracyKey(null)
     clearHideTimeout()
     setActivePoint(point)
     setActiveTooltip(null)
@@ -1011,16 +1245,59 @@ function ChartPanel({
   }
 
   function handleTooltipSurfaceEnter(surface: TooltipSurface) {
+    if (armAccuracyTimeoutRef.current) {
+      clearTimeout(armAccuracyTimeoutRef.current)
+      armAccuracyTimeoutRef.current = null
+    }
+
     clearHideTimeout()
+    setArmedAccuracyKey(isAccuracySurface(surface) ? surface.key : null)
     setActivePoint(null)
     setActiveTooltip(surface)
   }
 
   function handleTooltipSurfaceLeave(surfaceKey: string) {
+    if (armAccuracyTimeoutRef.current) {
+      clearTimeout(armAccuracyTimeoutRef.current)
+      armAccuracyTimeoutRef.current = null
+    }
+
+    setArmedAccuracyKey((current) => current === surfaceKey ? null : current)
     clearHideTimeout()
     hideTooltipTimeoutRef.current = setTimeout(() => {
       setActiveTooltip((current) => current?.key === surfaceKey ? null : current)
     }, TOOLTIP_HIDE_DELAY_MS)
+  }
+
+  function armAccuracyMarker(marker: AccuracyMarker) {
+    if (armAccuracyTimeoutRef.current) {
+      clearTimeout(armAccuracyTimeoutRef.current)
+    }
+
+    clearHideTimeout()
+    setArmedAccuracyKey(marker.key)
+    setActivePoint(null)
+    setSelectedPointKey(null)
+    setSelectedPoint(null)
+    setActiveTooltip(null)
+    armAccuracyTimeoutRef.current = setTimeout(() => {
+      setActiveTooltip(marker)
+      armAccuracyTimeoutRef.current = null
+    }, ACCURACY_TOOLTIP_ARM_DELAY_MS)
+  }
+
+  function activateAccuracyMarker(marker: AccuracyMarker) {
+    if (armAccuracyTimeoutRef.current) {
+      clearTimeout(armAccuracyTimeoutRef.current)
+      armAccuracyTimeoutRef.current = null
+    }
+
+    clearHideTimeout()
+    setArmedAccuracyKey(marker.key)
+    setActivePoint(null)
+    setSelectedPointKey(null)
+    setSelectedPoint(null)
+    setActiveTooltip(marker)
   }
 
   function handleRangePreset(preset: RangePreset) {
@@ -1028,13 +1305,29 @@ function ChartPanel({
     setZoomRange(null)
   }
 
+  function scheduleChartSurfaceDismissal() {
+    if (armAccuracyTimeoutRef.current) {
+      clearTimeout(armAccuracyTimeoutRef.current)
+      armAccuracyTimeoutRef.current = null
+    }
+
+    clearHideTimeout()
+    hideTooltipTimeoutRef.current = setTimeout(() => {
+      setActivePoint(null)
+      setActiveTooltip(null)
+      setSelectedPointKey(null)
+      setSelectedPoint(null)
+      setArmedAccuracyKey(null)
+    }, TOOLTIP_HIDE_DELAY_MS)
+  }
+
   function handleChartMouseDown(event: React.MouseEvent<SVGSVGElement>) {
-    if (event.button !== 0 || visibleDates.length < 2 || !svgRef.current) {
+    if (chartLayout.isTouch || event.button !== 0 || visibleDates.length < 2 || !svgRef.current) {
       return
     }
 
     const rect = svgRef.current.getBoundingClientRect()
-    const startX = chartXFromClientX(event.clientX, rect)
+    const startX = chartXFromClientX(event.clientX, rect, chartLayout)
     setDragSelection({ startX, currentX: startX })
   }
 
@@ -1044,7 +1337,7 @@ function ChartPanel({
     }
 
     const rect = svgRef.current.getBoundingClientRect()
-    setDragSelection({ ...dragSelection, currentX: chartXFromClientX(event.clientX, rect) })
+    setDragSelection({ ...dragSelection, currentX: chartXFromClientX(event.clientX, rect, chartLayout) })
   }
 
   function commitZoomSelection() {
@@ -1061,8 +1354,8 @@ function ChartPanel({
       return
     }
 
-    const startDate = dateFromChartX(startX, visibleDates)
-    const endDate = dateFromChartX(endX, visibleDates)
+    const startDate = dateFromChartX(startX, visibleDates, chartLayout)
+    const endDate = dateFromChartX(endX, visibleDates, chartLayout)
 
     setDragSelection(null)
 
@@ -1104,10 +1397,15 @@ function ChartPanel({
         </div>
       </div>
 
-      <div ref={chartSurfaceRef} className="chart-surface">
+      <div
+        ref={chartSurfaceRef}
+        className="chart-surface"
+        onMouseEnter={clearHideTimeout}
+        onMouseLeave={scheduleChartSurfaceDismissal}
+      >
         <svg
           ref={svgRef}
-          viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
+          viewBox={`0 0 ${chartLayout.width} ${chartLayout.height}`}
           className="chart-svg"
           role="img"
           aria-label="Time series chart"
@@ -1120,13 +1418,13 @@ function ChartPanel({
             hideTooltipTimeoutRef.current = setTimeout(() => setActivePoint(null), TOOLTIP_HIDE_DELAY_MS)
           }}
         >
-        <line x1={CHART_PADDING_LEFT} y1={CHART_HEIGHT - CHART_PADDING_BOTTOM} x2={CHART_WIDTH - CHART_PADDING_RIGHT} y2={CHART_HEIGHT - CHART_PADDING_BOTTOM} className="chart-axis" />
-        <line x1={CHART_PADDING_LEFT} y1={CHART_PADDING_TOP} x2={CHART_PADDING_LEFT} y2={CHART_HEIGHT - CHART_PADDING_BOTTOM} className="chart-axis" />
+        <line x1={chartLayout.paddingLeft} y1={chartLayout.height - chartLayout.paddingBottom} x2={chartLayout.width - chartLayout.paddingRight} y2={chartLayout.height - chartLayout.paddingBottom} className="chart-axis" />
+        <line x1={chartLayout.paddingLeft} y1={chartLayout.paddingTop} x2={chartLayout.paddingLeft} y2={chartLayout.height - chartLayout.paddingBottom} className="chart-axis" />
 
         {tooltipAnchorPoint ? (
           <g className="chart-crosshair">
-            <line x1={tooltipAnchorPoint.x} y1={CHART_PADDING_TOP} x2={tooltipAnchorPoint.x} y2={CHART_HEIGHT - CHART_PADDING_BOTTOM} className="chart-crosshair-line is-vertical" />
-            <line x1={CHART_PADDING_LEFT} y1={tooltipAnchorPoint.pointY} x2={CHART_WIDTH - CHART_PADDING_RIGHT} y2={tooltipAnchorPoint.pointY} className="chart-crosshair-line is-horizontal" />
+            <line x1={tooltipAnchorPoint.x} y1={chartLayout.paddingTop} x2={tooltipAnchorPoint.x} y2={chartLayout.height - chartLayout.paddingBottom} className="chart-crosshair-line is-vertical" />
+            <line x1={chartLayout.paddingLeft} y1={tooltipAnchorPoint.pointY} x2={chartLayout.width - chartLayout.paddingRight} y2={tooltipAnchorPoint.pointY} className="chart-crosshair-line is-horizontal" />
             <line
               x1={tooltipAnchorPoint.x}
               y1={tooltipAnchorPoint.pointY}
@@ -1142,25 +1440,25 @@ function ChartPanel({
 
           return (
             <g key={`y-${tick.offset}`}>
-              <line x1={CHART_PADDING_LEFT} y1={y} x2={CHART_WIDTH - CHART_PADDING_RIGHT} y2={y} className="chart-grid" />
-              <text x={CHART_PADDING_LEFT - 14} y={y + 4} textAnchor="end" className="chart-tick-label">{tick.label}</text>
+              <line x1={chartLayout.paddingLeft} y1={y} x2={chartLayout.width - chartLayout.paddingRight} y2={y} className="chart-grid" />
+              <text x={chartLayout.paddingLeft - 14} y={y + 4} textAnchor="end" className="chart-tick-label">{tick.label}</text>
             </g>
           )
         })}
 
         {xTicks.map((tick) => {
-          const x = CHART_PADDING_LEFT + tick.offset * (CHART_WIDTH - CHART_PADDING_LEFT - CHART_PADDING_RIGHT)
+          const x = chartLayout.paddingLeft + tick.offset * (chartLayout.width - chartLayout.paddingLeft - chartLayout.paddingRight)
 
           return (
             <g key={`x-${tick.offset}`}>
-              <line x1={x} y1={CHART_HEIGHT - CHART_PADDING_BOTTOM} x2={x} y2={CHART_HEIGHT - CHART_PADDING_BOTTOM + 6} className="chart-axis" />
-              <text x={x} y={CHART_HEIGHT - CHART_PADDING_BOTTOM + 18} textAnchor="middle" className="chart-tick-label">{tick.label}</text>
+              <line x1={x} y1={chartLayout.height - chartLayout.paddingBottom} x2={x} y2={chartLayout.height - chartLayout.paddingBottom + 6} className="chart-axis" />
+              <text x={x} y={chartLayout.height - chartLayout.paddingBottom + 18} textAnchor="middle" className="chart-tick-label">{tick.label}</text>
             </g>
           )
         })}
 
         {visibleSeries.map((entry, index) => {
-          const polyline = buildPolylinePoints(entry.points, minimum, maximum, pointX)
+          const polyline = buildPolylinePoints(entry.points, minimum, maximum, pointX, chartLayout)
 
           return (
             <g key={entry.id} className="chart-series-layer" style={{ animationDelay: `${index * 60}ms` }}>
@@ -1214,18 +1512,26 @@ function ChartPanel({
         })}
         {accuracyMarkers.map((marker) => {
           const markerY = pointY(marker.value) + (marker.diff >= 0 ? -16 : 18)
+          const isArmed = armedAccuracyKey === marker.key || activeTooltip?.key === marker.key
 
           return (
-            <g key={marker.key} className="chart-accuracy-layer">
+            <g key={marker.key} className={`chart-accuracy-layer${isArmed ? ' is-armed' : ''}`}>
               <circle
                 cx={pointX(marker.date)}
                 cy={markerY - 2}
-                r={14}
-                className="chart-hit-area"
-                onMouseEnter={() => handleTooltipSurfaceEnter(marker)}
+                r={22}
+                className="chart-hit-area chart-hit-area-accuracy"
+                onMouseEnter={() => armAccuracyMarker(marker)}
                 onMouseLeave={() => handleTooltipSurfaceLeave(marker.key)}
-                onFocus={() => handleTooltipSurfaceEnter(marker)}
+                onFocus={() => armAccuracyMarker(marker)}
                 onBlur={() => handleTooltipSurfaceLeave(marker.key)}
+                onClick={() => activateAccuracyMarker(marker)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    activateAccuracyMarker(marker)
+                  }
+                }}
                 role="button"
                 tabIndex={0}
                 aria-label={`${formatSeriesLabel(locale, 'forecast-accuracy')} ${formatDate(locale, marker.date)} ${formatSignedDiff(locale, marker.diff)}`}
@@ -1234,7 +1540,7 @@ function ChartPanel({
                 x={pointX(marker.date)}
                 y={markerY}
                 textAnchor="middle"
-                className={`chart-accuracy-marker ${marker.diff >= 0 ? 'is-positive' : 'is-negative'}`}
+                className={`chart-accuracy-marker ${marker.diff >= 0 ? 'is-positive' : 'is-negative'}${isArmed ? ' is-armed' : ''}`}
               >
                 {marker.diff >= 0 ? '↑' : '↓'}
               </text>
@@ -1244,15 +1550,15 @@ function ChartPanel({
         {dragSelection ? (
           <rect
             x={Math.min(dragSelection.startX, dragSelection.currentX)}
-            y={CHART_PADDING_TOP}
+            y={chartLayout.paddingTop}
             width={Math.abs(dragSelection.currentX - dragSelection.startX)}
-            height={CHART_HEIGHT - CHART_PADDING_TOP - CHART_PADDING_BOTTOM}
+            height={chartLayout.height - chartLayout.paddingTop - chartLayout.paddingBottom}
             className="chart-brush"
           />
         ) : null}
         </svg>
 
-        {displayTooltip && tooltipCard ? (
+        {!chartLayout.isTouch && !useCompactTooltipRail && displayTooltip && tooltipCard ? (
           <div
             ref={tooltipRef}
             className={`chart-tooltip${tooltipPosition ? ` is-${tooltipPosition.placement}` : ''}${tooltipVariant ? ` ${tooltipVariantClass(tooltipVariant)}` : ''}`}
@@ -1274,13 +1580,14 @@ function ChartPanel({
                 <div className="chart-tooltip-divider" />
                 <div className="chart-tooltip-interval-label">{tooltipCard.forecastInterval.label}</div>
                 <div className="chart-tooltip-interval-values">
-                  <div>
+                  <div className="chart-tooltip-interval-bound is-lower">
                     <span>{locale === 'pl' ? 'Dolny' : 'Lower'}</span>
+                    <i className="chart-tooltip-interval-arrow" aria-hidden="true">↓</i>
                     <strong>{tooltipCard.forecastInterval.lowerValue}</strong>
                   </div>
-                  <div className="chart-tooltip-interval-arrow">↓</div>
-                  <div>
+                  <div className="chart-tooltip-interval-bound is-upper">
                     <span>{locale === 'pl' ? 'Górny' : 'Upper'}</span>
+                    <i className="chart-tooltip-interval-arrow" aria-hidden="true">↑</i>
                     <strong>{tooltipCard.forecastInterval.upperValue}</strong>
                   </div>
                 </div>
@@ -1312,6 +1619,62 @@ function ChartPanel({
           </div>
         ) : null}
       </div>
+
+      {chartLayout.isTouch || useCompactTooltipRail ? (
+        <div className={`chart-tooltip-mobile-wrap${displayTooltip && tooltipCard ? ' is-active' : ' is-reserved'}`}>
+          {displayTooltip && tooltipCard ? (
+          <div ref={tooltipRef} className={`chart-tooltip${tooltipVariant ? ` ${tooltipVariantClass(tooltipVariant)}` : ''}`}>
+            <div className="chart-tooltip-series">{tooltipCard.series}</div>
+            <div className="chart-tooltip-component">{tooltipCard.component}</div>
+            <strong>{tooltipCard.date}</strong>
+            <div className="chart-tooltip-divider" />
+            {tooltipCard.primaryLabel ? <div className="chart-tooltip-primary-label">{tooltipCard.primaryLabel}</div> : null}
+            <div className="chart-tooltip-primary-value">{tooltipCard.primaryValue}</div>
+            {tooltipCard.forecastInterval ? (
+              <>
+                <div className="chart-tooltip-divider" />
+                <div className="chart-tooltip-interval-label">{tooltipCard.forecastInterval.label}</div>
+                <div className="chart-tooltip-interval-values">
+                  <div className="chart-tooltip-interval-bound is-lower">
+                    <span>{locale === 'pl' ? 'Dolny' : 'Lower'}</span>
+                    <i className="chart-tooltip-interval-arrow" aria-hidden="true">↓</i>
+                    <strong>{tooltipCard.forecastInterval.lowerValue}</strong>
+                  </div>
+                  <div className="chart-tooltip-interval-bound is-upper">
+                    <span>{locale === 'pl' ? 'Górny' : 'Upper'}</span>
+                    <i className="chart-tooltip-interval-arrow" aria-hidden="true">↑</i>
+                    <strong>{tooltipCard.forecastInterval.upperValue}</strong>
+                  </div>
+                </div>
+              </>
+            ) : null}
+            {tooltipCard.detailRows.length > 0 ? (
+              <>
+                <div className="chart-tooltip-divider" />
+                <dl>
+                  {tooltipCard.detailRows.map((row) => (
+                    <div key={`${displayTooltip.key}-mobile-detail-${row.label}`} className="tooltip-row">
+                      <dt>{row.label}</dt>
+                      <dd>{row.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </>
+            ) : null}
+            {tooltipCard.businessDescriptionLines.length > 0 ? (
+              <>
+                <div className="chart-tooltip-divider" />
+                <div className="chart-tooltip-business-lines">
+                  {tooltipCard.businessDescriptionLines.map((line) => (
+                    <span key={`${displayTooltip.key}-mobile-${line}`}>{line}</span>
+                  ))}
+                </div>
+              </>
+            ) : null}
+          </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="chart-footer">
         <div className="chart-legend chart-legend-footer">
@@ -1358,9 +1721,11 @@ export function RawDataView() {
   const locale = useLocale() as Locale
   const t = useTranslations('RawDataView')
   const pathname = usePathname()
+  const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [componentsState, setComponentsState] = useState<LoadState>('idle')
   const [seriesState, setSeriesState] = useState<LoadState>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
   const [components, setComponents] = useState<ComponentListItem[]>([])
   const [selectedComponentName, setSelectedComponentName] = useState('')
   const [selectedComponentCode, setSelectedComponentCode] = useState('')
@@ -1370,10 +1735,14 @@ export function RawDataView() {
   const [showForecastAccuracy, setShowForecastAccuracy] = useState(false)
   const [series, setSeries] = useState<SeriesResponse | null>(null)
   const [viewerPayload, setViewerPayload] = useState<TimeSeriesViewerPayload | null>(null)
+  const seriesAbortRef = useRef<AbortController | null>(null)
+  const seriesCacheRef = useRef<Map<string, CachedSeriesEntry>>(new Map())
 
   const selectedComponent = components.find((item) => item.componentName === selectedComponentName) ?? null
   const benchmarkRequired = (selectedComponent?.benchmarkCount ?? 0) > 1 && selectedComponentCode.length === 0
-  const effectiveComponentCode = selectedComponentCode || (selectedComponent?.benchmarkCount === 1 ? (selectedComponent.availableBenchmarks[0]?.componentCode ?? '') : '')
+  const effectiveComponentCode = selectedComponent?.benchmarkCount === 1
+    ? (selectedComponent.availableBenchmarks[0]?.componentCode ?? '')
+    : selectedComponentCode
   const componentOptions: SearchableSelectOption[] = components.map((component) => ({
     value: component.componentName,
     label: component.componentName,
@@ -1382,6 +1751,32 @@ export function RawDataView() {
     value: benchmark.componentCode ?? '',
     label: benchmark.componentCode ?? t('benchmarkMissing'),
   }))
+
+  function retryLoad() {
+    setErrorMessage(null)
+    setReloadNonce((current) => current + 1)
+  }
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    setTheme(window.localStorage.getItem('tsiv-theme') === 'dark' ? 'dark' : 'light')
+  }, [])
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return
+    }
+
+    document.documentElement.dataset.theme = theme
+    window.localStorage.setItem('tsiv-theme', theme)
+  }, [theme])
+
+  function toggleTheme() {
+    setTheme((current) => current === 'light' ? 'dark' : 'light')
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -1412,7 +1807,7 @@ export function RawDataView() {
         }
 
         setComponentsState('error')
-        setErrorMessage((error as Error).message)
+        setErrorMessage(toUiLoadErrorMessage(error, t('errors.components'), t('errors.timeout')))
       }
     }
 
@@ -1421,7 +1816,7 @@ export function RawDataView() {
     return () => {
       cancelled = true
     }
-  }, [locale, t])
+  }, [locale, t, reloadNonce])
 
   useEffect(() => {
     if (!selectedComponent) {
@@ -1461,6 +1856,7 @@ export function RawDataView() {
     }
 
     let cancelled = false
+    seriesAbortRef.current?.abort()
     const params = new URLSearchParams({
       locale,
       componentName: selectedComponentName,
@@ -1472,37 +1868,140 @@ export function RawDataView() {
       params.set('componentCode', effectiveComponentCode)
     }
 
+    const cacheKey = buildClientSeriesCacheKey(locale, selectedComponentName, effectiveComponentCode, showForecast)
+    const controller = new AbortController()
+    seriesAbortRef.current = controller
+    const interactionStartedAt = performance.now()
+    let timedOut = false
+
+    async function waitForNextPaint() {
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve())
+      })
+    }
+
     async function loadData() {
+      const cached = seriesCacheRef.current.get(cacheKey)
+
+      if (cached && Date.now() - cached.cachedAt <= CLIENT_SERIES_CACHE_TTL_MS) {
+        setErrorMessage(null)
+        setSeries(cached.response)
+        setViewerPayload(cached.payload)
+        setSeriesState('ready')
+        const committedAt = performance.now()
+        await waitForNextPaint()
+
+        if (!cancelled) {
+          const renderedAt = performance.now()
+          recordRawDataViewProfile({
+            componentName: selectedComponentName,
+            componentCode: effectiveComponentCode || null,
+            showForecast,
+            source: 'client-cache',
+            requestDispatchMs: 0,
+            networkMs: 0,
+            responseParseMs: 0,
+            adapterMs: 0,
+            commitMs: committedAt - interactionStartedAt,
+            firstPaintMs: renderedAt - committedAt,
+            totalInteractionMs: renderedAt - interactionStartedAt,
+            serverTotalMs: cached.response.profiling?.totalServerMs ?? null,
+          })
+        }
+
+        return
+      }
+
       setSeriesState('loading')
       setErrorMessage(null)
       setSeries(null)
       setViewerPayload(null)
 
+      const timeoutHandle = window.setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, 8000)
+
       try {
-        const seriesResponse = await fetch(`/api/series?${params.toString()}`, { cache: 'no-store' })
+        const requestStartedAt = performance.now()
+        const seriesResponse = await fetch(`/api/series?${params.toString()}`, { cache: 'no-store', signal: controller.signal })
+        const responseReceivedAt = performance.now()
         const seriesPayload = await seriesResponse.json() as SeriesResponse | { error?: string }
+        const responseParsedAt = performance.now()
 
         if (!seriesResponse.ok) {
           throw new Error('error' in seriesPayload ? seriesPayload.error ?? t('errors.series') : t('errors.series'))
         }
 
         const nextSeries = seriesPayload as SeriesResponse
+        const adapterStartedAt = performance.now()
         const nextViewerPayload = toTimeSeriesViewerPayload(nextSeries, locale)
+        const adapterFinishedAt = performance.now()
 
         if (cancelled) {
           return
         }
 
+        seriesCacheRef.current.set(cacheKey, {
+          response: nextSeries,
+          payload: nextViewerPayload,
+          cachedAt: Date.now(),
+        })
         setSeries(nextSeries)
         setViewerPayload(nextViewerPayload)
         setSeriesState('ready')
+        const committedAt = performance.now()
+        await waitForNextPaint()
+
+        if (!cancelled) {
+          const renderedAt = performance.now()
+          recordRawDataViewProfile({
+            componentName: selectedComponentName,
+            componentCode: effectiveComponentCode || null,
+            showForecast,
+            source: 'network',
+            requestDispatchMs: requestStartedAt - interactionStartedAt,
+            networkMs: responseReceivedAt - requestStartedAt,
+            responseParseMs: responseParsedAt - responseReceivedAt,
+            adapterMs: adapterFinishedAt - adapterStartedAt,
+            commitMs: committedAt - adapterFinishedAt,
+            firstPaintMs: renderedAt - committedAt,
+            totalInteractionMs: renderedAt - interactionStartedAt,
+            serverTotalMs: nextSeries.profiling?.totalServerMs ?? null,
+          })
+        }
       } catch (error) {
+        if ((error as Error).name === 'AbortError') {
+          if (timedOut && !cancelled) {
+            setSeriesState('error')
+            setErrorMessage(t('errors.timeout'))
+          }
+
+          recordRawDataViewProfile({
+            componentName: selectedComponentName,
+            componentCode: effectiveComponentCode || null,
+            showForecast,
+            source: 'aborted',
+            requestDispatchMs: 0,
+            networkMs: 0,
+            responseParseMs: 0,
+            adapterMs: 0,
+            commitMs: 0,
+            firstPaintMs: 0,
+            totalInteractionMs: performance.now() - interactionStartedAt,
+            serverTotalMs: null,
+          })
+          return
+        }
+
         if (cancelled) {
           return
         }
 
         setSeriesState('error')
-        setErrorMessage((error as Error).message)
+        setErrorMessage(toUiLoadErrorMessage(error, t('errors.series'), t('errors.timeout')))
+      } finally {
+        window.clearTimeout(timeoutHandle)
       }
     }
 
@@ -1510,12 +2009,13 @@ export function RawDataView() {
 
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [benchmarkRequired, effectiveComponentCode, locale, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t])
+  }, [benchmarkRequired, effectiveComponentCode, locale, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t, reloadNonce])
 
   return (
     <div className="shell-grid">
-      <section className="panel" style={{ gridColumn: 'span 12' }}>
+      <section className="panel filter-panel" style={{ gridColumn: 'span 12' }}>
         <div className="filters-topbar">
           <div>
             <strong>{t('workspaceTitle')}</strong>
@@ -1536,6 +2036,18 @@ export function RawDataView() {
               onClick={() => window.location.assign(replaceLocaleInPath(pathname, 'pl'))}
             >
               PL
+            </button>
+            <button
+              type="button"
+              className="language-switch-button theme-switch-button"
+              onClick={toggleTheme}
+              aria-label={t('toggleTheme')}
+              title={t('toggleTheme')}
+            >
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <circle cx="10" cy="10" r="6.25" />
+                <path d="M10 3.75a6.25 6.25 0 0 1 0 12.5Z" />
+              </svg>
             </button>
           </div>
         </div>
@@ -1567,25 +2079,28 @@ export function RawDataView() {
             />
           ) : null}
 
-          <label className="control-check">
-            <input type="checkbox" checked={showForecast} onChange={(event) => setShowForecast(event.target.checked)} />
-            <span>{t('showForecast')}</span>
-          </label>
+          <div className="control-check-row">
+            <label className="control-check">
+              <input type="checkbox" checked={showForecast} onChange={(event) => setShowForecast(event.target.checked)} />
+              <span>{t('showForecast')}</span>
+            </label>
 
-          <label className="control-check">
-            <input type="checkbox" checked={showForecastAccuracy} onChange={(event) => setShowForecastAccuracy(event.target.checked)} />
-            <span>{t('showForecastAccuracy')}</span>
-          </label>
-        </div>
-
-        <div className="status-row muted">
-          <span>{t('componentCount', { count: components.length })}</span>
-          {selectedComponent ? <span>{t('benchmarkCount', { count: selectedComponent.benchmarkCount })}</span> : null}
-          <span>{componentsState === 'loading' || seriesState === 'loading' ? t('loading') : t('ready')}</span>
+            <label className="control-check">
+              <input type="checkbox" checked={showForecastAccuracy} onChange={(event) => setShowForecastAccuracy(event.target.checked)} />
+              <span>{t('showForecastAccuracy')}</span>
+            </label>
+          </div>
         </div>
 
         {benchmarkRequired ? <p className="callout">{t('benchmarkRequired')}</p> : null}
-        {errorMessage ? <p className="callout callout-error">{errorMessage}</p> : null}
+        {errorMessage ? (
+          <div className="callout callout-error" role="status" aria-live="polite">
+            <div>{errorMessage}</div>
+            <div className="callout-actions">
+              <button type="button" className="callout-button" onClick={retryLoad}>{t('retry')}</button>
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <ChartPanel
@@ -1593,6 +2108,8 @@ export function RawDataView() {
         payload={viewerPayload}
         emptyMessage={benchmarkRequired ? t('chartNeedsBenchmark') : t('chartEmpty')}
         isLoading={componentsState === 'loading' || seriesState === 'loading'}
+        loadingTitle={t('loadingTitle')}
+        loadingHint={t('loadingHint')}
         resetZoomLabel={t('resetZoom')}
         sourceLabel={t('sourceLabel')}
         showForecastAccuracy={showForecastAccuracy}

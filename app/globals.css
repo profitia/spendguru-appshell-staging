@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --bg: #f5f7fb;
   --panel: rgba(255, 255, 255, 0.9);
   --text: #172033;
@@ -8,15 +8,14 @@
   --accent: #0f766e;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #07111f;
-    --panel: rgba(12, 23, 39, 0.92);
-    --text: #edf4ff;
-    --muted: #93a4bf;
-    --border: rgba(237, 244, 255, 0.12);
-    --accent: #34d399;
-  }
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0e1c2c;
+  --panel: rgba(17, 31, 47, 0.92);
+  --text: #edf4ff;
+  --muted: #93a4bf;
+  --border: rgba(237, 244, 255, 0.12);
+  --accent: #34d399;
 }
 
 * {
@@ -38,6 +37,23 @@ a {
   color: inherit;
 }
 
+.app-shell {
+  width: min(100%, 1760px);
+  margin: 0 auto;
+  padding: clamp(12px, 2vw, 24px);
+}
+
+.app-shell-brand {
+  margin-bottom: clamp(16px, 2.2vw, 24px);
+}
+
+.app-shell-kicker {
+  margin: 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+}
+
 .shell-grid {
   display: grid;
   gap: 1.25rem;
@@ -51,6 +67,12 @@ a {
   border-radius: 20px;
   padding: 1.35rem;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.08);
+  position: relative;
+  z-index: 0;
+}
+
+.filter-panel {
+  z-index: 30;
 }
 
 .muted {
@@ -82,10 +104,24 @@ input:focus-visible {
 }
 
 .filter-grid {
-  display: grid;
-  gap: 1.1rem;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 1.1rem;
+  align-items: flex-end;
+}
+
+.filter-grid > .control-block-searchable {
+  flex: 1 1 320px;
+  min-width: min(100%, 280px);
+}
+
+.control-check-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.9rem;
+  flex: 1 1 100%;
+  min-width: 0;
 }
 
 .filters-topbar {
@@ -123,6 +159,20 @@ input:focus-visible {
 .language-switch-button.is-active {
   background: color-mix(in srgb, var(--accent) 18%, transparent);
   color: var(--text);
+}
+
+.theme-switch-button {
+  min-width: 2.3rem;
+  line-height: 1;
+}
+
+.theme-switch-button svg {
+  width: 1rem;
+  height: 1rem;
+  display: block;
+  stroke: currentColor;
+  stroke-width: 1.35;
+  fill: color-mix(in srgb, currentColor 18%, transparent);
 }
 
 .control-block,
@@ -204,8 +254,12 @@ input:focus-visible {
   top: calc(100% + 0.45rem);
   left: 0;
   right: 0;
+  min-width: 100%;
+  max-width: min(100vw - 2rem, 38rem);
+  max-height: min(360px, calc(100vh - 6rem));
   z-index: 40;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 0.55rem;
   padding: 0.7rem;
   border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
@@ -213,6 +267,7 @@ input:focus-visible {
   background: color-mix(in srgb, var(--panel) 98%, transparent);
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
   backdrop-filter: blur(14px);
+  overflow: hidden;
 }
 
 .control-combobox-search-row {
@@ -240,7 +295,8 @@ input:focus-visible {
   list-style: none;
   margin: 0;
   padding: 0;
-  max-height: 280px;
+  min-height: 0;
+  max-height: none;
   overflow-y: auto;
   display: grid;
   gap: 0.22rem;
@@ -286,11 +342,12 @@ input:focus-visible {
   flex-direction: row;
   align-items: center;
   gap: 0.55rem;
-  min-height: 48px;
+  min-height: 40px;
   padding: 0.1rem 0;
   border: 0;
   border-radius: 0;
   background: transparent;
+  flex: 0 0 auto;
 }
 
 .control-check input {
@@ -323,12 +380,34 @@ input:focus-visible {
   border-color: rgba(190, 24, 93, 0.2);
 }
 
+.callout-actions {
+  margin-top: 0.85rem;
+}
+
+.callout-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.5rem 0.85rem;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.callout-button:hover,
+.callout-button:focus-visible {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
 .chart-header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
   gap: 1.2rem;
   margin-bottom: 1.2rem;
+}
+
+.chart-header > * {
+  min-width: 0;
 }
 
 .chart-subtitle {
@@ -388,6 +467,7 @@ input:focus-visible {
   flex-direction: column;
   align-items: flex-end;
   gap: 0.75rem;
+  min-width: 0;
 }
 
 .chart-range-buttons {
@@ -395,6 +475,8 @@ input:focus-visible {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.55rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chart-range-button,
@@ -451,6 +533,7 @@ input:focus-visible {
 }
 
 .chart-svg {
+  display: block;
   width: 100%;
   height: auto;
   overflow: visible;
@@ -459,10 +542,12 @@ input:focus-visible {
 .chart-surface {
   position: relative;
   padding: 0.25rem 0 0.65rem;
+  z-index: 1;
 }
 
 .chart-panel-full {
-  overflow: hidden;
+  overflow: visible;
+  z-index: 5;
 }
 
 .chart-axis {
@@ -542,6 +627,14 @@ input:focus-visible {
   cursor: pointer;
 }
 
+.chart-hit-area-accuracy {
+  pointer-events: all;
+}
+
+.chart-accuracy-layer {
+  isolation: isolate;
+}
+
 .chart-point.historical {
   stroke: #0f766e;
 }
@@ -567,8 +660,13 @@ input:focus-visible {
   font-size: 11px;
   font-weight: 700;
   opacity: 0.45;
+  pointer-events: none;
   user-select: none;
-  transition: opacity 180ms ease;
+  dominant-baseline: middle;
+  text-anchor: middle;
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 180ms ease, transform 180ms ease, fill 180ms ease;
 }
 
 .chart-accuracy-marker.is-positive {
@@ -577,6 +675,22 @@ input:focus-visible {
 
 .chart-accuracy-marker.is-negative {
   fill: #a16207;
+}
+
+.chart-accuracy-layer.is-armed .chart-accuracy-marker,
+.chart-accuracy-marker.is-armed {
+  opacity: 1;
+  transform: scale(1.12);
+}
+
+.chart-accuracy-layer.is-armed .chart-accuracy-marker.is-positive,
+.chart-accuracy-marker.is-positive.is-armed {
+  fill: #0f766e;
+}
+
+.chart-accuracy-layer.is-armed .chart-accuracy-marker.is-negative,
+.chart-accuracy-marker.is-negative.is-armed {
+  fill: #92400e;
 }
 
 .chart-brush {
@@ -593,12 +707,28 @@ input:focus-visible {
   border-radius: 16px;
   padding: 0.95rem;
   box-shadow: 0 20px 32px rgba(0, 0, 0, 0.16);
-  z-index: 2;
+  z-index: 20;
   pointer-events: auto;
   border-top-width: 3px;
   border-top-style: solid;
   border-top-color: transparent;
   animation: chartTooltipReveal 180ms ease;
+}
+
+.chart-tooltip-mobile-wrap {
+  margin-top: 0.85rem;
+  min-height: 188px;
+}
+
+.chart-tooltip-mobile-wrap .chart-tooltip {
+  position: static;
+  width: 100%;
+  max-width: none;
+  animation: none;
+}
+
+.chart-tooltip-mobile-wrap.is-reserved {
+  border-radius: 16px;
 }
 
 .chart-tooltip > strong {
@@ -651,10 +781,21 @@ input:focus-visible {
 
 .chart-tooltip-interval-values {
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.6rem;
-  align-items: center;
+  align-items: start;
   margin-top: 0.45rem;
+}
+
+.chart-tooltip-interval-bound {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-areas:
+    'label label'
+    'arrow value';
+  column-gap: 0.45rem;
+  row-gap: 0.12rem;
+  align-items: center;
 }
 
 .chart-tooltip-interval-values span {
@@ -662,16 +803,20 @@ input:focus-visible {
   font-size: 0.76rem;
   color: var(--muted);
   margin-bottom: 0.18rem;
+  grid-area: label;
 }
 
 .chart-tooltip-interval-values strong {
   display: block;
   font-size: 0.94rem;
+  grid-area: value;
 }
 
 .chart-tooltip-interval-arrow {
   color: var(--muted);
   font-size: 1rem;
+  line-height: 1;
+  grid-area: arrow;
 }
 
 .chart-tooltip-business-lines {
@@ -915,6 +1060,25 @@ input:focus-visible {
   padding: 1rem 0;
 }
 
+.chart-skeleton-copy {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 0.4rem;
+  text-align: center;
+  padding: 1.5rem;
+}
+
+.chart-skeleton-copy strong {
+  font-size: 1rem;
+}
+
+.chart-skeleton-copy span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 .chart-skeleton-grid {
   position: absolute;
   inset: 1rem 0;
@@ -985,7 +1149,12 @@ input:focus-visible {
   }
 
   .filter-grid {
-    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .filter-grid > .control-block-searchable,
+  .control-check-row {
+    min-width: 100%;
   }
 
   .filters-topbar {
@@ -1007,11 +1176,16 @@ input:focus-visible {
     justify-content: flex-start;
   }
 
+  .chart-actions {
+    width: 100%;
+  }
+
   .chart-range-buttons {
     overflow-x: auto;
     flex-wrap: nowrap;
     width: 100%;
     padding-bottom: 0.15rem;
+    scrollbar-width: thin;
   }
 
   .chart-skeleton-legend {
@@ -1020,5 +1194,84 @@ input:focus-visible {
 
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-shell {
+    padding: 12px;
+  }
+
+  .filter-panel {
+    backdrop-filter: none;
+  }
+
+  .panel {
+    padding: 1rem;
+    border-radius: 18px;
+  }
+
+  .filters-subtitle {
+    max-width: none;
+  }
+
+  .language-switch {
+    align-self: flex-start;
+  }
+
+  .control-check-row {
+    flex-wrap: nowrap;
+    gap: 0.15rem 0.6rem;
+    margin-top: -0.15rem;
+  }
+
+  .control-check {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 32px;
+    padding: 0;
+  }
+
+  .control-check span {
+    font-size: clamp(0.74rem, 2.7vw, 0.84rem);
+    line-height: 1.15;
+  }
+
+  .control-combobox-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: 12px;
+    bottom: 12px;
+    width: auto;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+  }
+
+  .chart-header {
+    gap: 0.9rem;
+  }
+
+  .chart-range-button,
+  .chart-reset-button,
+  .language-switch-button,
+  .control-combobox-trigger,
+  .control-combobox-option {
+    min-height: 44px;
+  }
+
+  .chart-tick-label {
+    font-size: 11px;
+  }
+
+  .chart-legend {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.2rem;
+  }
+
+  .chart-surface {
+    overflow: hidden;
   }
 }
