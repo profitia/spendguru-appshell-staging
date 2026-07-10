@@ -1,6 +1,6 @@
 import { subMonths } from './time-utils'
 
-import { listDashboardRecords } from '@/lib/raw-data/dashboard-record-query'
+import { listDashboardRecords, listDashboardRecordsWithMetrics } from '@/lib/raw-data/dashboard-record-query'
 import {
   toBackingRecord,
   toBusinessSafeDashboardRecord,
@@ -13,7 +13,16 @@ import {
 import { readBooleanQuery, readNumberQuery, type SeriesFilters } from '@/lib/raw-data/dashboard-record-filters'
 import type { DashboardRecordListFilters } from '@/lib/raw-data/dashboard-record-filters'
 
-import type { ComponentListResponse, RecordsResponse, SeriesResponse } from './series-contract'
+import type { ComponentListResponse, RecordsResponse, SeriesProfilingMetrics, SeriesResponse } from './series-contract'
+
+type ServerSeriesCacheEntry = {
+  key: string
+  cachedAt: number
+  payload: SeriesResponse
+}
+
+const SERVER_SERIES_CACHE_TTL_MS = 30_000
+const serverSeriesCache = new Map<string, ServerSeriesCacheEntry>()
 
 function toIsoString(value: Date | string | null | undefined): string | null {
   if (!value) {
@@ -81,6 +90,42 @@ function findBenchmarkVariants(records: DashboardRecordSource[]) {
   return variants
 }
 
+function measure<T>(action: () => T) {
+  const startedAt = performance.now()
+  const value = action()
+  return {
+    value,
+    durationMs: performance.now() - startedAt,
+  }
+}
+
+function readProfileMode(params: URLSearchParams) {
+  return params.get('profile') === '1'
+}
+
+function withProfiling(payload: Omit<SeriesResponse, 'profiling'>, profiling: SeriesProfilingMetrics | null): SeriesResponse {
+  if (!profiling) {
+    return payload
+  }
+
+  return {
+    ...payload,
+    profiling,
+  }
+}
+
+function buildSeriesCacheKey(filters: SeriesFilters, locale: 'pl' | 'en') {
+  return JSON.stringify({
+    locale,
+    organizationId: filters.organizationId ?? null,
+    pipelineId: filters.pipelineId ?? null,
+    componentName: filters.componentName ?? null,
+    componentCode: filters.componentCode ?? null,
+    historyMonths: filters.historyMonths ?? null,
+    showForecast: filters.showForecast,
+  })
+}
+
 export async function getComponentList(params: URLSearchParams, locale: 'pl' | 'en'): Promise<ComponentListResponse> {
   const records = filterBusinessRecords(
     await listDashboardRecords({
@@ -109,6 +154,8 @@ export async function getComponentList(params: URLSearchParams, locale: 'pl' | '
 }
 
 export async function getSeries(params: URLSearchParams, locale: 'pl' | 'en'): Promise<SeriesResponse> {
+  const profileMode = readProfileMode(params)
+  const totalStartedAt = performance.now()
   const filters: SeriesFilters = {
     organizationId: params.get('organizationId') ?? undefined,
     pipelineId: params.get('pipelineId') ?? undefined,
@@ -118,19 +165,66 @@ export async function getSeries(params: URLSearchParams, locale: 'pl' | 'en'): P
     showForecast: readBooleanQuery(params.get('showForecast'), false),
   }
 
-  const records = filterBusinessRecords(
-    await listDashboardRecords({
+  const cacheKey = buildSeriesCacheKey(filters, locale)
+  const cached = serverSeriesCache.get(cacheKey)
+
+  if (cached && Date.now() - cached.cachedAt <= SERVER_SERIES_CACHE_TTL_MS) {
+    if (profileMode) {
+      const profiling = cached.payload.profiling
+      return {
+        ...cached.payload,
+        profiling: profiling
+          ? {
+              ...profiling,
+              getClientMs: 0,
+              dbConnectMs: 0,
+              dbQueryMs: 0,
+              dbTotalMs: 0,
+              businessFilterMs: 0,
+              benchmarkVariantMs: 0,
+              scenarioFilterMs: 0,
+              sortMs: 0,
+              seriesBuildMs: 0,
+              totalServerMs: performance.now() - totalStartedAt,
+            }
+          : undefined,
+      }
+    }
+
+    return cached.payload
+  }
+
+  const dbResult = profileMode
+    ? await listDashboardRecordsWithMetrics({
       organizationId: filters.organizationId,
       pipelineId: filters.pipelineId,
-    }),
+    })
+    : {
+      records: await listDashboardRecords({
+        organizationId: filters.organizationId,
+        pipelineId: filters.pipelineId,
+      }),
+      metrics: {
+        getClientMs: 0,
+        dbConnectMs: 0,
+        dbQueryMs: 0,
+        dbTotalMs: 0,
+        fetchedCount: 0,
+      },
+    }
+
+  const filteredBusiness = measure(() => filterBusinessRecords(
+    dbResult.records,
     {
       componentName: filters.componentName,
       componentCode: filters.componentCode,
     },
     locale,
-  )
+  ))
 
-  const variants = findBenchmarkVariants(records)
+  const records = filteredBusiness.value
+  const variantBuild = measure(() => findBenchmarkVariants(records))
+  const variants = variantBuild.value
   const selectedVariant =
     filters.componentCode !== undefined
       ? variants.get(filters.componentCode ?? '__null__') ?? []
@@ -141,121 +235,184 @@ export async function getSeries(params: URLSearchParams, locale: 'pl' | 'en'): P
   const availableBenchmarks = Array.from(variants.values()).map((group) => toComponentListItem(group, { locale }).availableBenchmarks[0])
   const benchmarkSelectionRequired = variants.size > 1 && !filters.componentCode
 
+  const emptyPayload: Omit<SeriesResponse, 'profiling'> = {
+    selection: toSeriesSelection(records[0] ?? null, { locale }),
+    benchmarkSelectionRequired,
+    availableBenchmarks,
+    sourceInfo: null,
+    detailSummary: null,
+    forecastAnchor: null,
+    historicalWindow: { from: null, to: null },
+    historical: [],
+    forecast: null,
+  }
+
   if (benchmarkSelectionRequired || selectedVariant.length === 0) {
-    return {
-      selection: toSeriesSelection(records[0] ?? null, { locale }),
-      benchmarkSelectionRequired,
-      availableBenchmarks,
-      sourceInfo: null,
-      detailSummary: null,
-      forecastAnchor: null,
-      historicalWindow: { from: null, to: null },
-      historical: [],
-      forecast: null,
+    const payload = withProfiling(emptyPayload, profileMode ? {
+      recordCount: dbResult.metrics.fetchedCount || dbResult.records.length,
+      getClientMs: dbResult.metrics.getClientMs,
+      dbConnectMs: dbResult.metrics.dbConnectMs,
+      dbQueryMs: dbResult.metrics.dbQueryMs,
+      dbTotalMs: dbResult.metrics.dbTotalMs,
+      businessFilterMs: filteredBusiness.durationMs,
+      benchmarkVariantMs: variantBuild.durationMs,
+      scenarioFilterMs: 0,
+      sortMs: 0,
+      seriesBuildMs: 0,
+      totalServerMs: 0,
+      responseSizeBytes: 0,
+    } : null)
+
+    if (payload.profiling) {
+      payload.profiling.totalServerMs = performance.now() - totalStartedAt
+      payload.profiling.responseSizeBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8')
     }
+
+    return payload
   }
 
   const historicalBoundary = subMonths(new Date(), filters.historyMonths ?? 12)
-  const historicalRecords = filterScenario(selectedVariant, 'historical').filter((record) => {
+  const historicalScenario = measure(() => filterScenario(selectedVariant, 'historical').filter((record) => {
     const date = toBusinessSafeDashboardRecord(record, { locale }).sourceDate
     return date ? new Date(date) >= historicalBoundary : false
-  }).sort(bySourceDateAsc(locale))
-  const forecastRecords = filters.showForecast ? filterScenario(selectedVariant, 'forecast').sort(bySourceDateAsc(locale)) : []
-  const mappedHistorical = historicalRecords.map((record) => ({
-    raw: record,
-    mapped: toBusinessSafeDashboardRecord(record, { locale }),
   }))
-  const mappedForecast = forecastRecords.map((record) => ({
-    raw: record,
-    mapped: toBusinessSafeDashboardRecord(record, { locale }),
-  }))
-  const latestHistorical = mappedHistorical[mappedHistorical.length - 1] ?? null
-  const firstForecast = mappedForecast[0] ?? null
-  const summaryRecord = latestHistorical?.raw ?? firstForecast?.raw ?? selectedVariant[selectedVariant.length - 1] ?? null
-  const summaryMapped = summaryRecord ? toBusinessSafeDashboardRecord(summaryRecord, { locale }) : null
-  const forecastAnchor = latestHistorical
-    ? {
-        date: latestHistorical.mapped.sourceDate,
-        value: latestHistorical.mapped.metricValue,
-      }
-    : firstForecast
+  const forecastScenario = measure(() => (filters.showForecast ? filterScenario(selectedVariant, 'forecast') : []))
+  const historicalSort = measure(() => [...historicalScenario.value].sort(bySourceDateAsc(locale)))
+  const forecastSort = measure(() => [...forecastScenario.value].sort(bySourceDateAsc(locale)))
+  const historicalRecords = historicalSort.value
+  const forecastRecords = forecastSort.value
+
+  const seriesBuild = measure(() => {
+    const mappedHistorical = historicalRecords.map((record) => ({
+      raw: record,
+      mapped: toBusinessSafeDashboardRecord(record, { locale }),
+    }))
+    const mappedForecast = forecastRecords.map((record) => ({
+      raw: record,
+      mapped: toBusinessSafeDashboardRecord(record, { locale }),
+    }))
+    const latestHistorical = mappedHistorical[mappedHistorical.length - 1] ?? null
+    const firstForecast = mappedForecast[0] ?? null
+    const summaryRecord = latestHistorical?.raw ?? firstForecast?.raw ?? selectedVariant[selectedVariant.length - 1] ?? null
+    const summaryMapped = summaryRecord ? toBusinessSafeDashboardRecord(summaryRecord, { locale }) : null
+    const forecastAnchor = latestHistorical
       ? {
-          date: firstForecast.mapped.sourceDate,
-          value: firstForecast.mapped.metricValue,
+          date: latestHistorical.mapped.sourceDate,
+          value: latestHistorical.mapped.metricValue,
+        }
+      : firstForecast
+        ? {
+            date: firstForecast.mapped.sourceDate,
+            value: firstForecast.mapped.metricValue,
+          }
+        : null
+    const sourceInfo = summaryRecord && summaryMapped
+      ? {
+          benchmarkCode: summaryMapped.componentCode,
+          sourceLabel: summaryRecord.sourceId,
+          descriptionPl: summaryMapped.descriptionPl,
+          descriptionEn: summaryMapped.descriptionEn,
+          unit: summaryRecord.unit,
+          currency: summaryRecord.currency,
+          market: summaryRecord.market,
+          country: summaryRecord.country,
+          qualityStatus: summaryRecord.qualityStatus,
+          lastSyncedAt: toIsoString(summaryRecord.lastSyncedAt),
         }
       : null
-  const sourceInfo = summaryRecord && summaryMapped
-    ? {
-        benchmarkCode: summaryMapped.componentCode,
-        sourceLabel: summaryRecord.sourceId,
-        descriptionPl: summaryMapped.descriptionPl,
-        descriptionEn: summaryMapped.descriptionEn,
-        unit: summaryRecord.unit,
-        currency: summaryRecord.currency,
-        market: summaryRecord.market,
-        country: summaryRecord.country,
-        qualityStatus: summaryRecord.qualityStatus,
-        lastSyncedAt: toIsoString(summaryRecord.lastSyncedAt),
-      }
-    : null
-  const detailSummary = summaryRecord && summaryMapped
-    ? {
-        componentName: summaryMapped.componentName,
-        componentCode: summaryMapped.componentCode,
-        sourceDate: forecastAnchor?.date ?? summaryMapped.sourceDate,
-        scenarioType: latestHistorical?.mapped.scenarioType ?? summaryMapped.scenarioType,
-        metricValue: forecastAnchor?.value ?? summaryMapped.metricValue,
-        forecastLower: firstForecast?.mapped.lciValue ?? null,
-        forecastUpper: firstForecast?.mapped.uciValue ?? null,
-        forecastAccuracyDiff: firstForecast?.mapped.diff ?? null,
-        unit: summaryRecord.unit,
-        currency: summaryRecord.currency,
-        market: summaryRecord.market,
-        country: summaryRecord.country,
-        qualityStatus: summaryRecord.qualityStatus,
-        descriptionPl: summaryMapped.descriptionPl,
-        descriptionEn: summaryMapped.descriptionEn,
-        sourceLabel: summaryRecord.sourceId,
-        lastSyncedAt: toIsoString(summaryRecord.lastSyncedAt),
-      }
-    : null
+    const detailSummary = summaryRecord && summaryMapped
+      ? {
+          componentName: summaryMapped.componentName,
+          componentCode: summaryMapped.componentCode,
+          sourceDate: forecastAnchor?.date ?? summaryMapped.sourceDate,
+          scenarioType: latestHistorical?.mapped.scenarioType ?? summaryMapped.scenarioType,
+          metricValue: forecastAnchor?.value ?? summaryMapped.metricValue,
+          forecastLower: firstForecast?.mapped.lciValue ?? null,
+          forecastUpper: firstForecast?.mapped.uciValue ?? null,
+          forecastAccuracyDiff: firstForecast?.mapped.diff ?? null,
+          unit: summaryRecord.unit,
+          currency: summaryRecord.currency,
+          market: summaryRecord.market,
+          country: summaryRecord.country,
+          qualityStatus: summaryRecord.qualityStatus,
+          descriptionPl: summaryMapped.descriptionPl,
+          descriptionEn: summaryMapped.descriptionEn,
+          sourceLabel: summaryRecord.sourceId,
+          lastSyncedAt: toIsoString(summaryRecord.lastSyncedAt),
+        }
+      : null
 
-  return {
+    return {
+      sourceInfo,
+      detailSummary,
+      forecastAnchor,
+      historical: historicalRecords.map((record) => toChartReadyPoint(record, { locale })),
+      forecast: filters.showForecast
+        ? {
+            from: mappedForecast[0]?.mapped.sourceDate ?? null,
+            to: mappedForecast[mappedForecast.length - 1]?.mapped.sourceDate ?? null,
+            central: mappedForecast.map(({ raw }) => toChartReadyPoint(raw, { locale })),
+            upper: mappedForecast.map(({ raw, mapped }) => ({
+              date: mapped.sourceDate ?? new Date(0).toISOString(),
+              value: mapped.uciValue,
+              diff: mapped.diff,
+              recordId: raw.id,
+              dedupeKey: raw.dedupeKey,
+            })),
+            lower: mappedForecast.map(({ raw, mapped }) => ({
+              date: mapped.sourceDate ?? new Date(0).toISOString(),
+              value: mapped.lciValue,
+              diff: mapped.diff,
+              recordId: raw.id,
+              dedupeKey: raw.dedupeKey,
+            })),
+          }
+        : null,
+    }
+  })
+
+  const payload = withProfiling({
     selection: toSeriesSelection(selectedVariant[0] ?? null, { locale }),
     benchmarkSelectionRequired: false,
     availableBenchmarks,
-    sourceInfo,
-    detailSummary,
-    forecastAnchor,
+    sourceInfo: seriesBuild.value.sourceInfo,
+    detailSummary: seriesBuild.value.detailSummary,
+    forecastAnchor: seriesBuild.value.forecastAnchor,
     historicalWindow: {
       from: historicalRecords[0] ? toBusinessSafeDashboardRecord(historicalRecords[0], { locale }).sourceDate : null,
       to: historicalRecords[historicalRecords.length - 1]
         ? toBusinessSafeDashboardRecord(historicalRecords[historicalRecords.length - 1], { locale }).sourceDate
         : null,
     },
-    historical: historicalRecords.map((record) => toChartReadyPoint(record, { locale })),
-    forecast: filters.showForecast
-      ? {
-          from: mappedForecast[0]?.mapped.sourceDate ?? null,
-          to: mappedForecast[mappedForecast.length - 1]?.mapped.sourceDate ?? null,
-          central: mappedForecast.map(({ raw }) => toChartReadyPoint(raw, { locale })),
-          upper: mappedForecast.map(({ raw, mapped }) => ({
-            date: mapped.sourceDate ?? new Date(0).toISOString(),
-            value: mapped.uciValue,
-            diff: mapped.diff,
-            recordId: raw.id,
-            dedupeKey: raw.dedupeKey,
-          })),
-          lower: mappedForecast.map(({ raw, mapped }) => ({
-            date: mapped.sourceDate ?? new Date(0).toISOString(),
-            value: mapped.lciValue,
-            diff: mapped.diff,
-            recordId: raw.id,
-            dedupeKey: raw.dedupeKey,
-          })),
-        }
-      : null,
+    historical: seriesBuild.value.historical,
+    forecast: seriesBuild.value.forecast,
+  }, profileMode ? {
+    recordCount: dbResult.metrics.fetchedCount || dbResult.records.length,
+    getClientMs: dbResult.metrics.getClientMs,
+    dbConnectMs: dbResult.metrics.dbConnectMs,
+    dbQueryMs: dbResult.metrics.dbQueryMs,
+    dbTotalMs: dbResult.metrics.dbTotalMs,
+    businessFilterMs: filteredBusiness.durationMs,
+    benchmarkVariantMs: variantBuild.durationMs,
+    scenarioFilterMs: historicalScenario.durationMs + forecastScenario.durationMs,
+    sortMs: historicalSort.durationMs + forecastSort.durationMs,
+    seriesBuildMs: seriesBuild.durationMs,
+    totalServerMs: 0,
+    responseSizeBytes: 0,
+  } : null)
+
+  if (payload.profiling) {
+    payload.profiling.totalServerMs = performance.now() - totalStartedAt
+    payload.profiling.responseSizeBytes = Buffer.byteLength(JSON.stringify(payload), 'utf8')
   }
+
+  serverSeriesCache.set(cacheKey, {
+    key: cacheKey,
+    cachedAt: Date.now(),
+    payload,
+  })
+
+  return payload
 }
 
 export async function getRecords(params: URLSearchParams, locale: 'pl' | 'en'): Promise<RecordsResponse> {

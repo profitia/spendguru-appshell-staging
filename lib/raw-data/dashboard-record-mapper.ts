@@ -63,6 +63,8 @@ export interface BusinessSafeDashboardRecord {
 }
 
 const FIELD_CONTAINERS = ['fields', 'rawFields', 'normalizedFields', 'sourceFields', 'payload'] as const
+const carrierFieldCache = new WeakMap<DashboardRecordSource, Record<string, unknown>>()
+const businessRecordCache = new WeakMap<DashboardRecordSource, Map<MapperLocaleContext['locale'], BusinessSafeDashboardRecord>>()
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -117,15 +119,24 @@ function parseTupleCarrierString(value: unknown): Record<string, unknown> {
 }
 
 function readRecordCarrierFields(record: DashboardRecordSource): Record<string, unknown> {
+  const cached = carrierFieldCache.get(record)
+
+  if (cached) {
+    return cached
+  }
+
   const lineage = coerceRecord(record.lineageJson)
 
-  return {
+  const resolved = {
     ...parseTupleCarrierString(record.dedupeKey),
     ...parseTupleCarrierString(record.componentId),
     ...parseTupleCarrierString(lineage.duplicateKey),
     ...readNestedFieldCarrier(record.metadataJson),
     ...readNestedFieldCarrier(record.lineageJson),
   }
+
+  carrierFieldCache.set(record, resolved)
+  return resolved
 }
 
 function readSupplementalField(record: DashboardRecordSource, candidateKeys: string[]): unknown {
@@ -315,6 +326,13 @@ export function toBusinessSafeDashboardRecord(
   record: DashboardRecordSource,
   context: MapperLocaleContext,
 ): BusinessSafeDashboardRecord {
+  const cachedByLocale = businessRecordCache.get(record)
+  const cached = cachedByLocale?.get(context.locale)
+
+  if (cached) {
+    return cached
+  }
+
   const scenarioType = readBusinessScenarioType(record)
   const componentName = readBusinessComponentName(record)
   const componentCode = readBusinessComponentCode(record)
@@ -323,7 +341,7 @@ export function toBusinessSafeDashboardRecord(
   const descriptions = readBusinessDescriptions(record)
   const forecastFields = readBusinessForecastFields(record)
 
-  return {
+  const resolved = {
     scenarioType,
     scenarioLabel: toScenarioLabel(context.locale, scenarioType),
     componentName,
@@ -343,6 +361,11 @@ export function toBusinessSafeDashboardRecord(
       metricValueFromFallback: readMetricValueFallbackUsed(record, metricValue),
     },
   }
+
+  const nextCachedByLocale = cachedByLocale ?? new Map<MapperLocaleContext['locale'], BusinessSafeDashboardRecord>()
+  nextCachedByLocale.set(context.locale, resolved)
+  businessRecordCache.set(record, nextCachedByLocale)
+  return resolved
 }
 
 export function toBackingRecord(record: DashboardRecordSource, context: MapperLocaleContext): BackingRecord {

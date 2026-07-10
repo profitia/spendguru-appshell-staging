@@ -16,13 +16,16 @@
     "workspaceTitle": "Analysis workspace",
     "workspaceSubtitle": "Select a component and analysis range.",
     "language": "Language",
+    "toggleTheme": "Toggle color theme",
+    "switchToDark": "Switch to dark mode",
+    "switchToLight": "Switch to light mode",
     "component": "Component",
     "benchmark": "Benchmark",
     "componentSearchPlaceholder": "Search components",
     "benchmarkSearchPlaceholder": "Search benchmarks",
-    "searchEmptyTitle": "No matching components found.",
+    "searchEmptyTitle": "No matching components found",
     "searchEmptyHint": "Try another keyword.",
-    "benchmarkSearchEmptyTitle": "No matching benchmarks found.",
+    "benchmarkSearchEmptyTitle": "No matching benchmarks found",
     "benchmarkSearchEmptyHint": "Try another keyword.",
     "selectBenchmark": "Select a benchmark",
     "benchmarkMissing": "Missing index",
@@ -30,7 +33,7 @@
     "showForecast": "Show forecast",
     "showForecastAccuracy": "Show forecast accuracy",
     "forecastAccuracy": "Forecast Accuracy",
-    "benchmarkRequired": "This componentName has multiple benchmarks. Pick a benchmark before rendering the chart.",
+    "benchmarkRequired": "This component has multiple benchmarks. Pick one before rendering the chart.",
     "chartNeedsBenchmark": "Select a benchmark to draw the chart for this component.",
     "chartEmpty": "No data is available for the current chart selection.",
     "detailEmpty": "Select a chart point to inspect the business detail panel.",
@@ -40,9 +43,13 @@
     "benchmarkCount": "Benchmarks: {count}",
     "loading": "Loading...",
     "ready": "Ready",
+    "retry": "Retry",
+    "loadingTitle": "Preparing data for analysis",
+    "loadingHint": "Combining history and forecast",
     "errors": {
       "components": "Failed to load the component list.",
-      "series": "Failed to load the series payload."
+      "series": "Failed to load the chart data.",
+      "timeout": "The request took too long. Try again."
     }
   }
 }
