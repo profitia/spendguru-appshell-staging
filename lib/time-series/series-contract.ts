@@ -20,6 +20,21 @@ export interface ComponentListResponse {
   items: ComponentListItem[]
 }
 
+export interface SeriesProfilingMetrics {
+  recordCount: number
+  getClientMs: number
+  dbConnectMs: number
+  dbQueryMs: number
+  dbTotalMs: number
+  businessFilterMs: number
+  benchmarkVariantMs: number
+  scenarioFilterMs: number
+  sortMs: number
+  seriesBuildMs: number
+  totalServerMs: number
+  responseSizeBytes: number
+}
+
 export interface ChartReadyPoint {
   date: string
   value: number | null
@@ -132,6 +147,7 @@ export interface SeriesResponse {
   }
   historical: ChartReadyPoint[]
   forecast: ForecastSeriesLayer | null
+  profiling?: SeriesProfilingMetrics
 }
 
 export interface RecordsResponse {
