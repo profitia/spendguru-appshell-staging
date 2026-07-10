@@ -90,6 +90,9 @@ const TOOLTIP_OFFSET = 20
 const TOOLTIP_SURFACE_PADDING = 12
 const TOOLTIP_HIDE_DELAY_MS = 180
 const ACCURACY_TOOLTIP_ARM_DELAY_MS = 140
+const ACCURACY_MARKER_AXIS_CLEARANCE = 14
+const ACCURACY_MARKER_TOP_CLEARANCE = 12
+const EDGE_TICK_LABEL_OFFSET = 8
 const RANGE_PRESETS: RangePreset[] = ['3M', '6M', '1Y', '3Y', '5Y', 'ALL']
 const CLIENT_SERIES_CACHE_TTL_MS = 30_000
 
@@ -1456,11 +1459,15 @@ function ChartPanel({
 
         {xTicks.map((tick) => {
           const x = chartLayout.paddingLeft + tick.offset * (chartLayout.width - chartLayout.paddingLeft - chartLayout.paddingRight)
+          const isFirstTick = tick.offset <= 0.001
+          const isLastTick = tick.offset >= 0.999
+          const textAnchor = isFirstTick ? 'start' : isLastTick ? 'end' : 'middle'
+          const labelX = isFirstTick ? x + EDGE_TICK_LABEL_OFFSET : isLastTick ? x - EDGE_TICK_LABEL_OFFSET : x
 
           return (
             <g key={`x-${tick.offset}`}>
               <line x1={x} y1={chartLayout.height - chartLayout.paddingBottom} x2={x} y2={chartLayout.height - chartLayout.paddingBottom + 6} className="chart-axis" />
-              <text x={x} y={chartLayout.height - chartLayout.paddingBottom + 18} textAnchor="middle" className="chart-tick-label">{tick.label}</text>
+              <text x={labelX} y={chartLayout.height - chartLayout.paddingBottom + 18} textAnchor={textAnchor} className="chart-tick-label">{tick.label}</text>
             </g>
           )
         })}
@@ -1519,7 +1526,12 @@ function ChartPanel({
           )
         })}
         {accuracyMarkers.map((marker) => {
-          const markerY = pointY(marker.value) + (marker.diff >= 0 ? -16 : 18)
+          const axisY = chartLayout.height - chartLayout.paddingBottom
+          const unclampedMarkerY = pointY(marker.value) + (marker.diff >= 0 ? -16 : 18)
+          const markerY = Math.max(
+            chartLayout.paddingTop + ACCURACY_MARKER_TOP_CLEARANCE,
+            Math.min(unclampedMarkerY, axisY - ACCURACY_MARKER_AXIS_CLEARANCE),
+          )
           const isArmed = armedAccuracyKey === marker.key || activeTooltip?.key === marker.key
 
           return (
