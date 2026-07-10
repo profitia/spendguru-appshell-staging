@@ -412,6 +412,12 @@ function SearchableSelect({
   }
 
   function commitSelection(option: SearchableSelectOption) {
+    inputRef.current?.blur()
+
+    if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur()
+    }
+
     onValueChange(option.value)
     closeDropdown()
   }
@@ -540,6 +546,8 @@ function SearchableSelect({
                         aria-selected={isSelected}
                         className={`control-combobox-option${isSelected ? ' is-selected' : ''}${isHighlighted ? ' is-highlighted' : ''}`}
                         onMouseEnter={() => setHighlightedIndex(index)}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onTouchStart={(event) => event.preventDefault()}
                         onClick={() => commitSelection(option)}
                       >
                         {option.label}
