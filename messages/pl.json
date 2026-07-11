@@ -33,6 +33,18 @@
     "showForecast": "Pokaż prognozy",
     "showForecastAccuracy": "Pokaż trafność prognoz",
     "forecastAccuracy": "Trafność prognozy",
+    "accuracyPresentationMode": "Sposób prezentacji",
+    "forecastHorizon": "Horyzont prognozy",
+    "forecastHorizonInfoButton": "Wyjaśnij horyzont prognozy",
+    "forecastHorizonInfoTitle": "Jak czytać horyzont",
+    "forecastHorizonInfoBody": "1M porównuje rzeczywisty odczyt z prognozą przygotowaną miesiąc wcześniej. 3M i 6M wykorzystują starsze migawki prognozy dla tego samego miesiąca docelowego.",
+    "historicalForecastUnavailableHint": "Historyczne prognozy nie są dostępne dla tego benchmarku. Możesz nadal używać widoku odchylenia procentowego.",
+    "historicalForecastErrorHint": "Nie udało się teraz załadować historycznych prognoz. Możesz spróbować ponownie albo pozostać przy widoku odchylenia procentowego.",
+    "pinnedTooltipLabel": "Przypięty punkt",
+    "accuracyModes": {
+      "percentageArrows": "Odchylenie %",
+      "historicalForecast": "Historyczna prognoza"
+    },
     "benchmarkRequired": "Ten komponent ma wiele benchmarków. Wybierz jeden przed wyświetleniem wykresu.",
     "chartNeedsBenchmark": "Wybierz benchmark, aby pokazać wykres dla tego komponentu.",
     "chartEmpty": "Brak danych do narysowania wykresu dla bieżącego wyboru.",
