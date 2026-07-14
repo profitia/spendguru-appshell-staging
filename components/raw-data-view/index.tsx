@@ -4,33 +4,21 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { useLocale, useTranslations } from 'next-intl'
 import { usePathname } from 'next/navigation'
 
-import {
-  resolvePaddedValueDomain,
-  shouldCommitZoomSelection,
-  shouldTogglePinnedSurface,
-} from '@/lib/chart/chart-panel-helpers'
-import { buildForecastAccuracyCacheKey } from '@/lib/forecast-accuracy/forecast-accuracy-cache'
-import { resolveDatePlotOffset } from '@/lib/chart/date-plot-offset'
-import type {
-  ForecastAccuracyErrorResponse,
-  ForecastAccuracyHorizonMonths,
-  ForecastAccuracyResponse,
-} from '@/lib/forecast-accuracy/forecast-accuracy-contract'
-import {
-  buildHistoricalForecastComparison,
-  buildHistoricalForecastDeltaSegments,
-  buildHistoricalForecastLineSegments,
-  resolveHistoricalForecastPercentageDiff,
-  selectPreferredAccuracyHorizon,
-  type AccuracyPresentationMode,
-  type HistoricalForecastComparison,
-  type HistoricalForecastComparisonPoint,
-} from '@/lib/forecast-accuracy/historical-forecast-view'
+import { resolveNiceScaleDomain } from '@/lib/chart/chart-panel-helpers'
+
 import type {
   ComponentListItem,
   ComponentListResponse,
   SeriesResponse,
 } from '@/lib/time-series/series-contract'
+import {
+  FORECAST_ACCURACY_HORIZONS,
+  type ForecastAccuracyHorizonMonths,
+  type ForecastAccuracyResponse,
+} from '@/lib/forecast-accuracy/forecast-accuracy-contract'
+import {
+  toForecastAccuracyViewerPayload,
+} from '@/lib/time-series-viewer/forecast-accuracy-to-time-series-viewer'
 import { toTimeSeriesViewerPayload } from '@/lib/time-series-viewer/raw-data-to-time-series-viewer'
 import type {
   TimeSeriesViewerLocale,
@@ -41,14 +29,14 @@ import type {
 } from '@/lib/time-series-viewer/time-series-viewer-contract'
 
 type Locale = TimeSeriesViewerLocale
-type TooltipVariant = TimeSeriesViewerSeries['kind'] | 'forecast-accuracy' | 'historical-forecast'
+type TooltipVariant = TimeSeriesViewerSeries['kind'] | 'forecast-accuracy'
 type VisibilityKey = TooltipVariant
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error'
-type HistoricalForecastLayerState = LoadState | 'unavailable'
 type RangePreset = '3M' | '6M' | '1Y' | '3Y' | '5Y' | 'ALL'
 type VisibleRange = { start: string; end: string }
 type DragSelection = { startX: number; currentX: number } | null
+type TooltipSurface = { key: string; date: string; tooltipModel: TimeSeriesViewerTooltipModel; variant: TooltipVariant }
 type TooltipCardRow = { label: string; value: string }
 type TooltipCardModel = {
   series: string
@@ -59,6 +47,19 @@ type TooltipCardModel = {
   forecastInterval: { label: string; lowerValue: string; upperValue: string } | null
   detailRows: TooltipCardRow[]
   businessDescriptionLines: string[]
+}
+type SharedTooltipRow = {
+  key: string
+  label: string
+  value: string
+  kind: TimeSeriesViewerSeries['kind']
+  lineStyle: TimeSeriesViewerSeries['lineStyle']
+  isMissing: boolean
+}
+type SharedTooltipCardModel = {
+  component: string
+  date: string
+  rows: SharedTooltipRow[]
 }
 type AccuracyMarker = {
   key: string
@@ -73,11 +74,6 @@ type TooltipPlacement = 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left
 type CachedSeriesEntry = {
   response: SeriesResponse
   payload: TimeSeriesViewerPayload
-  cachedAt: number
-}
-
-type CachedForecastAccuracyEntry = {
-  response: ForecastAccuracyResponse
   cachedAt: number
 }
 
@@ -101,25 +97,40 @@ type RawDataViewProfiler = {
   history: ClientSeriesProfiling[]
 }
 
-type HistoricalForecastSurface = {
-  key: string
-  component: string
-  date: string
-  value: number
-  actualValue: number
-  forecastValue: number
-  horizonMonths: ForecastAccuracyHorizonMonths
-  sourceDifferenceValue: number | null
-  sourceErrorType: string | null
-  tooltipModel: TimeSeriesViewerTooltipModel
-  variant: 'historical-forecast'
-}
-
-type TooltipSurface = AccuracyMarker | HistoricalForecastSurface
-
 type SearchableSelectOption = {
   value: string
   label: string
+}
+
+function mergeAccuracyIntoViewerPayload(
+  basePayload: TimeSeriesViewerPayload | null,
+  accuracyPayload: TimeSeriesViewerPayload | null,
+  enabled: boolean,
+) {
+  if (!enabled) {
+    return basePayload
+  }
+
+  if (!basePayload) {
+    return accuracyPayload
+  }
+
+  if (!accuracyPayload) {
+    return basePayload
+  }
+
+  const mergedSeries = [...basePayload.series]
+
+  const historicalForecastSeries = accuracyPayload.series.find((entry) => entry.kind === 'historical-forecast') ?? null
+
+  if (historicalForecastSeries) {
+    mergedSeries.push(historicalForecastSeries)
+  }
+
+  return {
+    ...basePayload,
+    series: mergedSeries,
+  }
 }
 
 const CHART_WIDTH = 920
@@ -136,8 +147,6 @@ const ACCURACY_TOOLTIP_ARM_DELAY_MS = 140
 const ACCURACY_MARKER_AXIS_CLEARANCE = 14
 const ACCURACY_MARKER_TOP_CLEARANCE = 12
 const EDGE_TICK_LABEL_OFFSET = 8
-const ZOOM_DRAG_THRESHOLD_PX = 12
-const FORECAST_POINT_CAPTURE_RADIUS_PX = 14
 const RANGE_PRESETS: RangePreset[] = ['3M', '6M', '1Y', '3Y', '5Y', 'ALL']
 const CLIENT_SERIES_CACHE_TTL_MS = 30_000
 
@@ -243,25 +252,6 @@ function formatNumber(locale: Locale, value: number | null) {
   }).format(value)
 }
 
-function formatDiff(locale: Locale, value: number | null) {
-  if (value === null) {
-    return ' - '
-  }
-
-  return `${new Intl.NumberFormat(locale === 'pl' ? 'pl-PL' : 'en-US', {
-    maximumFractionDigits: 3,
-  }).format(value)}%`
-}
-
-function formatSignedDiff(locale: Locale, value: number | null) {
-  if (value === null) {
-    return ' - '
-  }
-
-  const sign = value > 0 ? '+' : ''
-  return `${sign}${formatDiff(locale, value)}`
-}
-
 function formatPrimaryValue(locale: Locale, value: number | null, unit: string | null, currency: string | null) {
   const numberValue = formatNumber(locale, value)
   const suffix = [currency, unit].filter((item) => item && item.trim().length > 0).join(' ')
@@ -287,28 +277,12 @@ function looksTechnicalIdentifier(value: string | null | undefined) {
   return false
 }
 
-function describeForecastDirection(locale: Locale, diff: number) {
-  return diff > 0
-    ? {
-        forecast: locale === 'pl' ? 'Powyżej odczytu rzeczywistego' : 'Above actual',
-        accuracy: locale === 'pl' ? 'Prognoza zawyzona' : 'Over-forecast',
-        interpretation: locale === 'pl'
-          ? 'Wczesniejsza prognoza byla powyzej zrealizowanego odczytu rynkowego.'
-          : 'The previous forecast was above the realized market reading.',
-      }
-    : {
-        forecast: locale === 'pl' ? 'Ponizej odczytu rzeczywistego' : 'Below actual',
-        accuracy: locale === 'pl' ? 'Prognoza zanizona' : 'Under-forecast',
-        interpretation: locale === 'pl'
-          ? 'Wczesniejsza prognoza byla ponizej zrealizowanego odczytu rynkowego.'
-          : 'The previous forecast was below the realized market reading.',
-      }
-}
-
 function tooltipVariantClass(variant: TooltipVariant) {
   switch (variant) {
     case 'historical':
       return 'is-historical'
+    case 'historical-forecast':
+      return 'is-historical-forecast'
     case 'forecast-central':
       return 'is-forecast-central'
     case 'forecast-upper':
@@ -317,8 +291,6 @@ function tooltipVariantClass(variant: TooltipVariant) {
       return 'is-forecast-lower'
     case 'forecast-accuracy':
       return 'is-forecast-accuracy'
-    case 'historical-forecast':
-      return 'is-historical-forecast'
   }
 }
 
@@ -326,6 +298,8 @@ function formatSeriesLabel(locale: Locale, kind: TooltipVariant) {
   switch (kind) {
     case 'historical':
       return locale === 'pl' ? 'Ceny historyczne' : 'Historical Prices'
+    case 'historical-forecast':
+      return locale === 'pl' ? 'Historyczna prognoza' : 'Historical forecast'
     case 'forecast-central':
       return locale === 'pl' ? 'Prognoza' : 'Forecast'
     case 'forecast-upper':
@@ -333,9 +307,7 @@ function formatSeriesLabel(locale: Locale, kind: TooltipVariant) {
     case 'forecast-lower':
       return locale === 'pl' ? 'Dolne ograniczenie prognozy' : 'Forecast Lower Bound'
     case 'forecast-accuracy':
-      return locale === 'pl' ? 'Trafnosc prognozy' : 'Forecast Accuracy'
-    case 'historical-forecast':
-      return locale === 'pl' ? 'Historyczna prognoza' : 'Historical Forecast'
+      return locale === 'pl' ? 'Trafność prognozy' : 'Forecast Accuracy'
   }
 }
 
@@ -356,61 +328,6 @@ function replaceLocaleInPath(pathname: string, nextLocale: Locale) {
 
 function buildClientSeriesCacheKey(locale: Locale, componentName: string, componentCode: string, showForecast: boolean) {
   return JSON.stringify({ locale, componentName, componentCode: componentCode || null, showForecast })
-}
-
-function isForecastAccuracyErrorResponse(payload: unknown): payload is ForecastAccuracyErrorResponse {
-  return typeof payload === 'object'
-    && payload !== null
-    && 'error' in payload
-    && typeof (payload as { error?: { code?: unknown } }).error?.code === 'string'
-}
-
-function buildHistoricalForecastTooltipModel(
-  locale: Locale,
-  point: HistoricalForecastComparisonPoint,
-  component: string,
-  horizonMonths: ForecastAccuracyHorizonMonths,
-): TimeSeriesViewerTooltipModel {
-  const percentageDiff = resolveHistoricalForecastPercentageDiff(point.actualValue, point.forecastValue)
-
-  return {
-    title: locale === 'pl' ? 'Historyczna prognoza' : 'Historical Forecast',
-    rows: [
-      { label: locale === 'pl' ? 'Komponent' : 'Component', value: component },
-      { label: locale === 'pl' ? 'Data' : 'Date', value: formatDate(locale, point.date) },
-      { label: locale === 'pl' ? 'Odczyt rzeczywisty' : 'Actual', value: formatNumber(locale, point.actualValue) },
-      { label: locale === 'pl' ? `Prognoza ${horizonMonths}M` : `${horizonMonths}M forecast`, value: formatNumber(locale, point.forecastValue) },
-      {
-        label: locale === 'pl' ? 'Odchylenie' : 'Difference',
-        value: percentageDiff === null ? '—' : formatSignedDiff(locale, percentageDiff),
-      },
-      {
-        label: locale === 'pl' ? 'Interpretacja biznesowa' : 'Business interpretation',
-        value: describeForecastDirection(locale, point.forecastValue - point.actualValue).interpretation,
-      },
-    ],
-  }
-}
-
-function toHistoricalForecastSurface(
-  locale: Locale,
-  point: HistoricalForecastComparisonPoint,
-  component: string,
-  horizonMonths: ForecastAccuracyHorizonMonths,
-): HistoricalForecastSurface {
-  return {
-    key: `historical-forecast:${point.key}`,
-    component,
-    date: point.date,
-    value: point.forecastValue,
-    actualValue: point.actualValue,
-    forecastValue: point.forecastValue,
-    horizonMonths,
-    sourceDifferenceValue: point.sourceDifferenceValue,
-    sourceErrorType: point.sourceErrorType,
-    tooltipModel: buildHistoricalForecastTooltipModel(locale, point, component, horizonMonths),
-    variant: 'historical-forecast',
-  }
 }
 
 function getRawDataViewProfiler() {
@@ -671,18 +588,6 @@ function SearchableSelect({
   )
 }
 
-function formatForecastDirectionValue(locale: Locale, diff: number | null) {
-  if (diff === null) {
-    return ' - '
-  }
-
-  const direction = diff >= 0
-    ? locale === 'pl' ? 'powyżej odczytu rzeczywistego' : 'above actual'
-    : locale === 'pl' ? 'poniżej odczytu rzeczywistego' : 'below actual'
-
-  return `${formatSignedDiff(locale, diff)} ${direction}`
-}
-
 function buildSourceLine(locale: Locale, payload: TimeSeriesViewerPayload) {
   const lines = [
     buildCountryBadge(locale, payload.country, payload.description),
@@ -696,10 +601,6 @@ function buildSourceLine(locale: Locale, payload: TimeSeriesViewerPayload) {
 function buildTooltipDescriptionLines(payload: TimeSeriesViewerPayload) {
   const lines = [payload.description ?? payload.market ?? null]
   return lines.filter((line): line is string => Boolean(line && line.trim().length > 0))
-}
-
-function isHistoricalForecastSurface(surface: TooltipSurface | TimeSeriesViewerPoint): surface is HistoricalForecastSurface {
-  return !('detailModel' in surface) && surface.variant === 'historical-forecast'
 }
 
 function resolveTooltipPoint(surface: TooltipSurface | TimeSeriesViewerPoint, locale: Locale, payload: TimeSeriesViewerPayload) {
@@ -721,29 +622,6 @@ function resolveTooltipPoint(surface: TooltipSurface | TimeSeriesViewerPoint, lo
     }
   }
 
-  if (isHistoricalForecastSurface(surface)) {
-    return {
-      component: surface.component,
-      date: surface.date,
-      value: surface.actualValue,
-      primaryLabel: locale === 'pl' ? 'Odczyt rzeczywisty' : 'Actual',
-      interval: null,
-      detailRows: [
-        {
-          label: locale === 'pl' ? `Prognoza ${surface.horizonMonths}M` : `${surface.horizonMonths}M forecast`,
-          value: formatPrimaryValue(locale, surface.forecastValue, payload.unit, payload.currency),
-        },
-        {
-          label: locale === 'pl' ? 'Odchylenie' : 'Difference',
-          value: resolveHistoricalForecastPercentageDiff(surface.actualValue, surface.forecastValue) === null
-            ? '—'
-            : formatSignedDiff(locale, resolveHistoricalForecastPercentageDiff(surface.actualValue, surface.forecastValue)),
-        },
-      ] as TooltipCardRow[],
-      businessDescriptionLines: [describeForecastDirection(locale, surface.forecastValue - surface.actualValue).interpretation],
-    }
-  }
-
   const accuracySurface = surface as AccuracyMarker
 
   return {
@@ -752,13 +630,7 @@ function resolveTooltipPoint(surface: TooltipSurface | TimeSeriesViewerPoint, lo
     value: accuracySurface.value,
     primaryLabel: locale === 'pl' ? 'Odczyt rzeczywisty' : 'Actual',
     interval: null,
-    detailRows: [
-      { label: locale === 'pl' ? 'Prognoza' : 'Forecast', value: formatForecastDirectionValue(locale, accuracySurface.diff) },
-      {
-        label: locale === 'pl' ? 'Interpretacja biznesowa' : 'Business interpretation',
-        value: describeForecastDirection(locale, accuracySurface.diff).interpretation,
-      },
-    ],
+    detailRows: [] as TooltipCardRow[],
     businessDescriptionLines: [],
   }
 }
@@ -779,8 +651,6 @@ function buildTooltipCardModel(
     primaryLabel: resolved.primaryLabel,
     primaryValue: variant === 'forecast-accuracy'
       ? formatNumber(locale, resolved.value)
-      : variant === 'historical-forecast'
-        ? formatPrimaryValue(locale, resolved.value, payload.unit, payload.currency)
       : formatPrimaryValue(locale, detailModel?.value ?? ('detailModel' in surface || isAccuracySurface(surface) ? surface.value : null), detailModel?.unit ?? payload.unit, detailModel?.currency ?? payload.currency),
     forecastInterval: resolved.interval,
     detailRows: resolved.detailRows,
@@ -816,29 +686,13 @@ function buildDateTicks(locale: Locale, dates: string[], targetCount: number) {
 }
 
 function buildValueTicks(locale: Locale, values: number[], tickCount: number) {
-  if (values.length === 0) {
-    return []
-  }
+  const domain = resolveNiceScaleDomain(values)
 
-  const minimum = Math.min(...values)
-  const maximum = Math.max(...values)
-
-  if (minimum === maximum) {
-    return [{ value: minimum, label: formatNumber(locale, minimum), offset: 0 }]
-  }
-
-  const safeTickCount = Math.max(tickCount, 2)
-
-  return Array.from({ length: safeTickCount }, (_, index) => {
-    const ratio = index / (safeTickCount - 1)
-    const value = minimum + (maximum - minimum) * ratio
-
-    return {
-      value,
-      label: formatNumber(locale, value),
-      offset: ratio,
-    }
-  })
+  return domain.ticks.map((tick) => ({
+    value: tick.value,
+    label: formatNumber(locale, tick.value),
+    offset: tick.offset,
+  }))
 }
 
 function resolvePresetRange(historicalDates: string[], forecastDates: string[], preset: RangePreset): VisibleRange | null {
@@ -908,62 +762,6 @@ function filterSeriesToRange(series: TimeSeriesViewerSeries[], range: VisibleRan
   }))
 }
 
-function filterHistoricalForecastPointsToRange(
-  comparison: HistoricalForecastComparison | null,
-  range: VisibleRange | null,
-) {
-  if (!comparison) {
-    return []
-  }
-
-  if (!range) {
-    return comparison.points
-  }
-
-  const startMs = new Date(range.start).getTime()
-  const endMs = new Date(range.end).getTime()
-
-  return comparison.points.filter((point) => {
-    const pointMs = new Date(point.date).getTime()
-    return pointMs >= startMs && pointMs <= endMs
-  })
-}
-
-function buildAccuracyTooltip(locale: Locale, point: TimeSeriesViewerPoint, benchmarkCode: string | null): TimeSeriesViewerTooltipModel {
-  const direction = describeForecastDirection(locale, point.diff ?? 0)
-
-  return {
-    title: locale === 'pl' ? 'Trafnosc prognozy' : 'Forecast accuracy',
-    rows: [
-      { label: locale === 'pl' ? 'Data' : 'Date', value: formatDate(locale, point.date) },
-      { label: locale === 'pl' ? 'Odczyt rzeczywisty' : 'Actual', value: formatNumber(locale, point.value) },
-      { label: locale === 'pl' ? 'Prognoza' : 'Forecast', value: direction.forecast },
-      { label: locale === 'pl' ? 'Blad prognozy' : 'Forecast Error', value: formatSignedDiff(locale, point.diff) },
-      { label: locale === 'pl' ? 'Ocena' : 'Accuracy', value: direction.accuracy },
-      {
-        label: locale === 'pl' ? 'Interpretacja biznesowa' : 'Business interpretation',
-        value: direction.interpretation,
-      },
-    ],
-  }
-}
-
-function buildAccuracyMarkers(locale: Locale, series: TimeSeriesViewerSeries[], benchmarkCode: string | null): AccuracyMarker[] {
-  return series
-    .filter((entry) => entry.kind === 'historical')
-    .flatMap((entry) => entry.points)
-    .filter((point) => point.value !== null && point.diff !== null && point.diff !== 0)
-    .map((point) => ({
-      key: `accuracy-${point.key}`,
-      component: point.detailModel.componentName,
-      date: point.date,
-      value: point.value as number,
-      diff: point.diff as number,
-      tooltipModel: buildAccuracyTooltip(locale, point, benchmarkCode),
-      variant: 'forecast-accuracy',
-    }))
-}
-
 function flagFromCountryCode(countryCode: string) {
   return countryCode
     .toUpperCase()
@@ -992,15 +790,6 @@ function clampChartX(value: number, layout: ChartLayout) {
 function chartXFromClientX(clientX: number, rect: DOMRect, layout: ChartLayout) {
   const ratio = (clientX - rect.left) / rect.width
   return clampChartX(ratio * layout.width, layout)
-}
-
-function clampChartY(value: number, layout: ChartLayout) {
-  return Math.max(layout.paddingTop, Math.min(layout.height - layout.paddingBottom, value))
-}
-
-function chartYFromClientY(clientY: number, rect: DOMRect, layout: ChartLayout) {
-  const ratio = (clientY - rect.top) / rect.height
-  return clampChartY(ratio * layout.height, layout)
 }
 
 function dateFromChartX(x: number, dates: string[], layout: ChartLayout) {
@@ -1037,16 +826,69 @@ function buildPolylinePoints(
     .join(' ')
 }
 
+function buildAreaBetweenSeriesPath(
+  primarySeries: TimeSeriesViewerSeries | null,
+  secondarySeries: TimeSeriesViewerSeries | null,
+  pointX: (date: string) => number,
+  pointY: (value: number | null) => number,
+) {
+  if (!primarySeries || !secondarySeries) {
+    return ''
+  }
+
+  const toDateKey = (value: string) => new Date(value).toISOString().slice(0, 10)
+
+  const secondaryByDate = new Map(
+    secondarySeries.points
+      .filter((point) => point.value !== null)
+      .map((point) => [toDateKey(point.date), point]),
+  )
+
+  const pairs = primarySeries.points
+    .filter((point) => point.value !== null)
+    .map((point) => {
+      const secondaryPoint = secondaryByDate.get(toDateKey(point.date)) ?? null
+
+      if (!secondaryPoint || secondaryPoint.value === null) {
+        return null
+      }
+
+      return {
+        date: point.date,
+        primaryValue: point.value,
+        secondaryValue: secondaryPoint.value,
+      }
+    })
+    .filter((pair): pair is { date: string; primaryValue: number; secondaryValue: number } => pair !== null)
+
+  if (pairs.length < 2) {
+    return ''
+  }
+
+  const upperPath = pairs
+    .map((pair) => `${pointX(pair.date)},${pointY(pair.primaryValue)}`)
+    .join(' L ')
+  const lowerPath = [...pairs]
+    .reverse()
+    .map((pair) => `${pointX(pair.date)},${pointY(pair.secondaryValue)}`)
+    .join(' L ')
+
+  return `M ${upperPath} L ${lowerPath} Z`
+}
+
 function buildPlotGeometry(series: TimeSeriesViewerSeries[], layout: ChartLayout) {
   const allDates = Array.from(new Set(series.flatMap((entry) => entry.points.map((point) => point.date))))
     .sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
   const allValues = series.flatMap((entry) => entry.points.map((point) => point.value).filter((value): value is number => value !== null))
-  const { minimum, maximum } = resolvePaddedValueDomain(allValues)
+  const yDomain = resolveNiceScaleDomain(allValues)
+  const minimum = yDomain.minimum
+  const maximum = yDomain.maximum
+  const dateIndex = new Map(allDates.map((date, index) => [date, index]))
   const dateDenominator = Math.max(allDates.length - 1, 1)
   const valueRange = maximum - minimum || 1
 
   function pointX(date: string) {
-    return layout.paddingLeft + (resolveDatePlotOffset(allDates, date) / dateDenominator) * (layout.width - layout.paddingLeft - layout.paddingRight)
+    return layout.paddingLeft + ((dateIndex.get(date) ?? 0) / dateDenominator) * (layout.width - layout.paddingLeft - layout.paddingRight)
   }
 
   function pointY(value: number | null) {
@@ -1056,15 +898,72 @@ function buildPlotGeometry(series: TimeSeriesViewerSeries[], layout: ChartLayout
   return {
     minimum,
     maximum,
+    yDomain,
     pointX,
     pointY,
   }
+}
+
+function resolveSeriesOrder(kind: string) {
+  switch (kind) {
+    case 'historical':
+      return 0
+    case 'historical-forecast':
+      return 1
+    case 'forecast-central':
+      return 2
+    case 'forecast-lower':
+      return 3
+    case 'forecast-upper':
+      return 4
+    default:
+      return 100
+  }
+}
+
+function buildSharedTooltipCardModel(
+  locale: Locale,
+  date: string,
+  payload: TimeSeriesViewerPayload,
+  series: TimeSeriesViewerSeries[],
+): SharedTooltipCardModel {
+  const rows = [...series]
+    .sort((left, right) => resolveSeriesOrder(left.kind) - resolveSeriesOrder(right.kind))
+    .map((entry) => {
+      const point = entry.points.find((candidate) => candidate.date === date) ?? null
+      const detailModel = point?.detailModel ?? null
+
+      return {
+        key: `${entry.id}-${date}`,
+        label: entry.kind === 'historical-forecast'
+          ? (point?.tooltipModel.rows.find((row) => row.label === (locale === 'pl' ? 'Seria' : 'Series'))?.value ?? entry.label)
+          : entry.label,
+        value: point
+          ? formatPrimaryValue(locale, point.value, detailModel?.unit ?? payload.unit, detailModel?.currency ?? payload.currency)
+          : '—',
+        kind: entry.kind,
+        lineStyle: entry.lineStyle,
+        isMissing: point === null,
+      }
+    })
+
+  return {
+    component: payload.title,
+    date: formatDate(locale, date),
+    rows,
+  }
+}
+
+function hasSharedTooltipRows(card: SharedTooltipCardModel | null) {
+  return card !== null && card.rows.some((row) => !row.isMissing)
 }
 
 function legendClass(kind: TimeSeriesViewerSeries['kind']) {
   switch (kind) {
     case 'historical':
       return 'historical'
+    case 'historical-forecast':
+      return 'historical-forecast'
     case 'forecast-central':
       return 'forecast-central'
     case 'forecast-upper':
@@ -1091,13 +990,7 @@ function ChartPanel({
   loadingHint,
   resetZoomLabel,
   sourceLabel,
-  accuracyPresentationMode,
-  forecastAccuracyLabel,
-  historicalForecastLabel,
-  historicalForecastResponse,
-  historicalForecastState,
-  historicalForecastMessage,
-  pinnedTooltipLabel,
+  showForecastAccuracy,
 }: {
   locale: Locale
   payload: TimeSeriesViewerPayload | null
@@ -1107,19 +1000,14 @@ function ChartPanel({
   loadingHint: string
   resetZoomLabel: string
   sourceLabel: string
-  accuracyPresentationMode: AccuracyPresentationMode
-  forecastAccuracyLabel: string
-  historicalForecastLabel: string
-  historicalForecastResponse: ForecastAccuracyResponse | null
-  historicalForecastState: HistoricalForecastLayerState
-  historicalForecastMessage: string | null
-  pinnedTooltipLabel: string
+  showForecastAccuracy: boolean
 }) {
-  const [activePoint, setActivePoint] = useState<TimeSeriesViewerPoint | null>(null)
-  const [activeTooltip, setActiveTooltip] = useState<TooltipSurface | null>(null)
+  const [activeDate, setActiveDate] = useState<string | null>(null)
+  const [activeTooltip, setActiveTooltip] = useState<AccuracyMarker | null>(null)
   const [activePreset, setActivePreset] = useState<RangePreset>('ALL')
   const [selectedSurfaceKey, setSelectedSurfaceKey] = useState<string | null>(null)
-  const [selectedSurface, setSelectedSurface] = useState<TooltipSurface | TimeSeriesViewerPoint | null>(null)
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
+  const [selectedSurface, setSelectedSurface] = useState<AccuracyMarker | null>(null)
   const [selectedSurfaceVariant, setSelectedSurfaceVariant] = useState<TooltipVariant | null>(null)
   const [armedAccuracyKey, setArmedAccuracyKey] = useState<string | null>(null)
   const [zoomRange, setZoomRange] = useState<VisibleRange | null>(null)
@@ -1131,31 +1019,20 @@ function ChartPanel({
   const svgRef = useRef<SVGSVGElement | null>(null)
   const chartSurfaceRef = useRef<HTMLDivElement | null>(null)
   const tooltipRef = useRef<HTMLDivElement | null>(null)
-  const dragSelectionRef = useRef<DragSelection>(null)
-  const windowDragMoveHandlerRef = useRef<((event: MouseEvent) => void) | null>(null)
-  const windowDragUpHandlerRef = useRef<(() => void) | null>(null)
   const hideTooltipTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const armAccuracyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const suppressSurfaceClickRef = useRef(false)
-  const handledSurfaceMouseDownKeyRef = useRef<string | null>(null)
   const chartLayout = resolveChartLayout(viewportWidth, isTouchInput)
   const useCompactTooltipRail = viewportWidth <= 420
-  const pinnedSurfaceKey = selectedSurface?.key ?? selectedSurfaceKey
-  const previewHistoricalSeries = payload?.series.find((entry) => entry.kind === 'historical') ?? null
-  const previewForecastSeries = payload?.series.filter((entry) => entry.kind !== 'historical') ?? []
-  const previewFilteredSeries = payload?.series.filter((entry) => !hiddenItems.includes(entry.kind)) ?? []
-  const previewHistoricalDates = uniqueSortedDates(previewHistoricalSeries ? [previewHistoricalSeries] : [])
-  const previewForecastDates = uniqueSortedDates(previewForecastSeries)
-  const previewPresetRange = resolvePresetRange(previewHistoricalDates, previewForecastDates, activePreset)
-  const visibleDatesForZoom = uniqueSortedDates(filterSeriesToRange(previewFilteredSeries, zoomRange ?? previewPresetRange))
+  const pinnedSurfaceKey = selectedSurface?.key ?? selectedSurfaceKey ?? selectedDate
 
   useEffect(() => {
     setActivePreset('ALL')
     setZoomRange(null)
     setSelectedSurfaceKey(null)
+    setSelectedDate(null)
     setSelectedSurface(null)
     setSelectedSurfaceVariant(null)
-    setActivePoint(null)
+    setActiveDate(null)
     setActiveTooltip(null)
     setArmedAccuracyKey(null)
     setHiddenItems([])
@@ -1173,10 +1050,6 @@ function ChartPanel({
       }
     }
   }, [])
-
-  useEffect(() => {
-    dragSelectionRef.current = dragSelection
-  }, [dragSelection])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -1207,9 +1080,10 @@ function ChartPanel({
       }
 
       clearHideTimeout()
-      setActivePoint(null)
+      setActiveDate(null)
       setActiveTooltip(null)
       setSelectedSurfaceKey(null)
+      setSelectedDate(null)
       setSelectedSurface(null)
       setSelectedSurfaceVariant(null)
       setArmedAccuracyKey(null)
@@ -1235,9 +1109,10 @@ function ChartPanel({
       return
     }
 
-    const displayTooltip = selectedSurface ?? activeTooltip ?? activePoint
+    const displaySurfaceTooltip = selectedSurface ?? activeTooltip
+    const displaySharedDate = displaySurfaceTooltip ? null : (selectedDate ?? activeDate)
 
-    if (!displayTooltip) {
+    if (!displaySurfaceTooltip && !displaySharedDate) {
       setTooltipPosition(null)
       return
     }
@@ -1250,10 +1125,10 @@ function ChartPanel({
     const presetRange = resolvePresetRange(historicalDates, forecastDates, activePreset)
     const effectiveRange = zoomRange ?? presetRange
     const visibleSeries = filterSeriesToRange(filteredSeries, effectiveRange)
+    const visibleDates = uniqueSortedDates(visibleSeries)
     const { pointX, pointY } = buildPlotGeometry(visibleSeries, chartLayout)
-    const anchorX = pointX(displayTooltip.date)
-    const anchorValue = displayTooltip.value
-    const anchorY = pointY(anchorValue)
+    const anchorX = pointX(displaySurfaceTooltip?.date ?? displaySharedDate ?? visibleDates[0] ?? '')
+    const anchorY = displaySurfaceTooltip ? pointY(displaySurfaceTooltip.value) : chartLayout.paddingTop + 28
     const tooltipRect = tooltipRef.current.getBoundingClientRect()
     const surfaceRect = chartSurfaceRef.current.getBoundingClientRect()
     const svgRect = svgRef.current.getBoundingClientRect()
@@ -1300,10 +1175,10 @@ function ChartPanel({
         placement: selectedCandidate.placement,
       }
     })
-  }, [isLoading, payload, selectedSurface, activeTooltip, activePoint, hiddenItems, activePreset, zoomRange, chartLayout, useCompactTooltipRail])
+  }, [isLoading, payload, selectedSurface, activeTooltip, selectedDate, activeDate, hiddenItems, activePreset, zoomRange, chartLayout, useCompactTooltipRail])
 
   useEffect(() => {
-    if (!activePoint && !activeTooltip && !selectedSurface) {
+    if (!activeDate && !selectedDate && !activeTooltip && !selectedSurface) {
       return
     }
 
@@ -1315,9 +1190,10 @@ function ChartPanel({
       }
 
       clearHideTimeout()
-      setActivePoint(null)
+      setActiveDate(null)
       setActiveTooltip(null)
       setSelectedSurfaceKey(null)
+      setSelectedDate(null)
       setSelectedSurface(null)
       setSelectedSurfaceVariant(null)
       setArmedAccuracyKey(null)
@@ -1325,19 +1201,15 @@ function ChartPanel({
 
     window.addEventListener('pointerdown', handlePointerDown)
     return () => window.removeEventListener('pointerdown', handlePointerDown)
-  }, [activePoint, activeTooltip, selectedSurface])
+  }, [activeDate, selectedDate, activeTooltip, selectedSurface])
 
   useEffect(() => {
-    if ((!chartLayout.isTouch && !useCompactTooltipRail) || !tooltipRef.current || (!activePoint && !activeTooltip && !selectedSurface)) {
+    if ((!chartLayout.isTouch && !useCompactTooltipRail) || !tooltipRef.current || (!activeDate && !selectedDate && !activeTooltip && !selectedSurface)) {
       return
     }
 
     tooltipRef.current.scrollIntoView({ block: 'nearest', inline: 'nearest' })
-  }, [chartLayout.isTouch, useCompactTooltipRail, activePoint, activeTooltip, selectedSurface])
-
-  useEffect(() => () => {
-    detachWindowDragListeners()
-  }, [])
+  }, [chartLayout.isTouch, useCompactTooltipRail, activeDate, selectedDate, activeTooltip, selectedSurface])
 
   if (isLoading) {
     return (
@@ -1389,48 +1261,38 @@ function ChartPanel({
   const { minimum, maximum, pointX, pointY } = buildPlotGeometry(visibleSeries, chartLayout)
   const xTicks = buildDateTicks(locale, visibleDates, chartLayout.dateTickTarget)
   const yTicks = buildValueTicks(locale, visibleValues, chartLayout.valueTickCount)
-  const accuracyMarkers = accuracyPresentationMode === 'percentage-arrows' && !hiddenItems.includes('forecast-accuracy')
-    ? buildAccuracyMarkers(locale, visibleSeries, payload.benchmarkCode ?? payload.sourceInfo?.benchmarkCode ?? null)
-    : []
-  const historicalForecastComparison = accuracyPresentationMode === 'historical-forecast' && historicalForecastResponse
-    ? buildHistoricalForecastComparison(historicalForecastResponse)
-    : null
-  const visibleHistoricalForecastPoints = historicalForecastComparison && !hiddenItems.includes('historical-forecast') && !hiddenItems.includes('historical')
-    ? filterHistoricalForecastPointsToRange(historicalForecastComparison, effectiveRange)
-    : []
-  const historicalForecastLineSegments = buildHistoricalForecastLineSegments(visibleHistoricalForecastPoints)
-  const historicalForecastDeltaSegments = buildHistoricalForecastDeltaSegments(visibleHistoricalForecastPoints)
-  const forecastInteractivePoints = accuracyPresentationMode === 'historical-forecast'
-    ? visibleSeries
-      .filter((entry) => entry.kind !== 'historical')
-      .flatMap((entry) => entry.points.filter((point) => point.value !== null).map((point) => ({ entry, point })))
-    : []
-  const displayTooltip = selectedSurface ?? activeTooltip ?? activePoint
-  const tooltipVariant = displayTooltip ? resolveSurfaceVariant(displayTooltip) : null
-  const tooltipCard = displayTooltip ? buildTooltipCardModel(locale, displayTooltip, payload) : null
-  const isTooltipPinned = !!displayTooltip && selectedSurface?.key === displayTooltip.key
+  const historicalVisibleSeries = visibleSeries.find((entry) => entry.kind === 'historical') ?? null
+  const historicalForecastVisibleSeries = visibleSeries.find((entry) => entry.kind === 'historical-forecast') ?? null
+  const historicalForecastDeltaPath = showForecastAccuracy && historicalVisibleSeries && historicalForecastVisibleSeries
+    ? buildAreaBetweenSeriesPath(historicalVisibleSeries, historicalForecastVisibleSeries, pointX, pointY)
+    : ''
+  const displaySurfaceTooltip = selectedSurface ?? activeTooltip
+  const displaySharedDate = displaySurfaceTooltip ? null : (selectedDate ?? activeDate)
+  const tooltipVariant = displaySurfaceTooltip ? resolveSurfaceVariant(displaySurfaceTooltip) : null
+  const tooltipCard = displaySurfaceTooltip ? buildTooltipCardModel(locale, displaySurfaceTooltip, payload) : null
+  const sharedTooltipCard = displaySharedDate ? buildSharedTooltipCardModel(locale, displaySharedDate, payload, visibleSeries) : null
   const sourceLine = buildSourceLine(locale, payload)
   const visibleRangeLabel = visibleDates.length > 0
     ? `${formatDate(locale, visibleDates[0])} - ${formatDate(locale, visibleDates[visibleDates.length - 1])}`
     : `${formatDate(locale, effectiveRange?.start ?? null)} - ${formatDate(locale, effectiveRange?.end ?? null)}`
   const chartValueContext = [payload.currency, payload.unit].filter((entry) => entry && entry.trim().length > 0).join(' · ')
 
-  const tooltipAnchorPoint = displayTooltip
+  const tooltipAnchorPoint = displaySurfaceTooltip || displaySharedDate
     ? (() => {
-        const x = pointX(displayTooltip.date)
+        const x = pointX(displaySurfaceTooltip?.date ?? displaySharedDate ?? visibleDates[0] ?? '')
 
-        if (isAccuracySurface(displayTooltip)) {
+        if (displaySurfaceTooltip && isAccuracySurface(displaySurfaceTooltip)) {
           return {
             x,
-            pointY: pointY(displayTooltip.value),
-            tooltipY: pointY(displayTooltip.value) + (displayTooltip.diff >= 0 ? -16 : 18),
+            pointY: pointY(displaySurfaceTooltip.value),
+            tooltipY: pointY(displaySurfaceTooltip.value) + (displaySurfaceTooltip.diff >= 0 ? -16 : 18),
           }
         }
 
         return {
           x,
-          pointY: pointY(displayTooltip.value),
-          tooltipY: pointY(displayTooltip.value),
+          pointY: chartLayout.paddingTop,
+          tooltipY: chartLayout.paddingTop,
         }
       })()
     : null
@@ -1446,23 +1308,7 @@ function ChartPanel({
     setHiddenItems((current) => current.includes(key) ? current.filter((item) => item !== key) : [...current, key])
   }
 
-  function pinSurface(surface: TooltipSurface | TimeSeriesViewerPoint, variant: TooltipVariant) {
-    clearHideTimeout()
-
-    if (shouldTogglePinnedSurface(selectedSurface?.key ?? null, selectedSurfaceVariant, surface.key, variant)) {
-      clearPinnedSelection()
-      return
-    }
-
-    setSelectedSurfaceKey(surface.key)
-    setSelectedSurface(surface)
-    setSelectedSurfaceVariant(variant)
-    setActivePoint(null)
-    setActiveTooltip(null)
-    setArmedAccuracyKey(isAccuracySurface(surface) ? surface.key : null)
-  }
-
-  function handlePointEnter(point: TimeSeriesViewerPoint) {
+  function handleSharedDateChange(date: string | null) {
     if (pinnedSurfaceKey) {
       return
     }
@@ -1474,22 +1320,22 @@ function ChartPanel({
 
     setArmedAccuracyKey(null)
     clearHideTimeout()
-    setActivePoint(point)
+    setActiveDate(date)
     setActiveTooltip(null)
   }
 
-  function handlePointLeave(pointKey: string) {
+  function handleSharedDateLeave() {
     if (pinnedSurfaceKey) {
       return
     }
 
     clearHideTimeout()
     hideTooltipTimeoutRef.current = setTimeout(() => {
-      setActivePoint((current) => current?.key === pointKey ? null : current)
+      setActiveDate(null)
     }, TOOLTIP_HIDE_DELAY_MS)
   }
 
-  function handleTooltipSurfaceEnter(surface: TooltipSurface) {
+  function handleTooltipSurfaceEnter(surface: AccuracyMarker) {
     if (pinnedSurfaceKey) {
       return
     }
@@ -1501,7 +1347,7 @@ function ChartPanel({
 
     clearHideTimeout()
     setArmedAccuracyKey(isAccuracySurface(surface) ? surface.key : null)
-    setActivePoint(null)
+    setActiveDate(null)
     setActiveTooltip(surface)
   }
 
@@ -1533,7 +1379,8 @@ function ChartPanel({
 
     clearHideTimeout()
     setArmedAccuracyKey(marker.key)
-    setActivePoint(null)
+    setActiveDate(null)
+    setSelectedDate(null)
     setSelectedSurfaceKey(null)
     setSelectedSurface(null)
     setSelectedSurfaceVariant(null)
@@ -1552,7 +1399,12 @@ function ChartPanel({
 
     clearHideTimeout()
     setArmedAccuracyKey(marker.key)
-    pinSurface(marker, 'forecast-accuracy')
+    setActiveDate(null)
+    setSelectedDate(null)
+    setActiveTooltip(null)
+    setSelectedSurfaceKey(marker.key)
+    setSelectedSurface(marker)
+    setSelectedSurfaceVariant('forecast-accuracy')
   }
 
   function handleRangePreset(preset: RangePreset) {
@@ -1561,10 +1413,6 @@ function ChartPanel({
   }
 
   function scheduleChartSurfaceDismissal() {
-    if (pinnedSurfaceKey) {
-      return
-    }
-
     if (armAccuracyTimeoutRef.current) {
       clearTimeout(armAccuracyTimeoutRef.current)
       armAccuracyTimeoutRef.current = null
@@ -1572,9 +1420,10 @@ function ChartPanel({
 
     clearHideTimeout()
     hideTooltipTimeoutRef.current = setTimeout(() => {
-      setActivePoint(null)
+      setActiveDate(null)
       setActiveTooltip(null)
       setSelectedSurfaceKey(null)
+      setSelectedDate(null)
       setSelectedSurface(null)
       setSelectedSurfaceVariant(null)
       setArmedAccuracyKey(null)
@@ -1584,152 +1433,65 @@ function ChartPanel({
   function clearPinnedSelection() {
     clearHideTimeout()
     setSelectedSurfaceKey(null)
+    setSelectedDate(null)
     setSelectedSurface(null)
     setSelectedSurfaceVariant(null)
-    setActivePoint(null)
+    setActiveDate(null)
     setActiveTooltip(null)
     setArmedAccuracyKey(null)
   }
 
   function isSelectedSeriesPoint(point: TimeSeriesViewerPoint, kind: TimeSeriesViewerSeries['kind']) {
-    if (!selectedSurface || selectedSurfaceVariant !== kind || !('detailModel' in selectedSurface)) {
-      return false
-    }
-
-    return selectedSurface.key === point.key
-      || (selectedSurface.recordId === point.recordId && selectedSurface.date === point.date)
+    return selectedSurface === null && selectedDate === point.date && !hiddenItems.includes(kind)
   }
 
-  function isHoveredSeriesPoint(point: TimeSeriesViewerPoint) {
-    return !pinnedSurfaceKey && activePoint?.key === point.key
-  }
-
-  function resolveNearestHistoricalForecastSurface(
-    event: React.MouseEvent<SVGElement>,
-    points: HistoricalForecastComparisonPoint[],
-  ) {
-    if (points.length === 0 || !svgRef.current || !historicalForecastComparison) {
+  function resolveDateFromPointerClientX(clientX: number) {
+    if (!svgRef.current || visibleDates.length === 0) {
       return null
     }
 
     const rect = svgRef.current.getBoundingClientRect()
-    const chartX = chartXFromClientX(event.clientX, rect, chartLayout)
-    const nearestPoint = points.reduce((best, point) => {
-      const nextDistance = Math.abs(pointX(point.date) - chartX)
-
-      if (!best) {
-        return { point, distance: nextDistance }
-      }
-
-      return nextDistance < best.distance ? { point, distance: nextDistance } : best
-    }, null as { point: HistoricalForecastComparisonPoint; distance: number } | null)
-
-    return nearestPoint
-      ? toHistoricalForecastSurface(locale, nearestPoint.point, payload?.title ?? nearestPoint.point.key, historicalForecastComparison.horizonMonths)
-      : null
+    const chartX = chartXFromClientX(clientX, rect, chartLayout)
+    return dateFromChartX(chartX, visibleDates, chartLayout)
   }
 
-  function resolveForecastPointFromEvent(event: React.MouseEvent<SVGElement>) {
-    if (forecastInteractivePoints.length === 0 || !svgRef.current) {
-      return null
-    }
-
-    const rect = svgRef.current.getBoundingClientRect()
-    const chartX = chartXFromClientX(event.clientX, rect, chartLayout)
-    const chartY = chartYFromClientY(event.clientY, rect, chartLayout)
-    const nearestPoint = forecastInteractivePoints.reduce((best, candidate) => {
-      const candidateX = pointX(candidate.point.date)
-      const candidateY = pointY(candidate.point.value)
-      const distance = Math.hypot(candidateX - chartX, candidateY - chartY)
-
-      if (!best || distance < best.distance) {
-        return { ...candidate, distance }
-      }
-
-      return best
-    }, null as ({ entry: TimeSeriesViewerSeries; point: TimeSeriesViewerPoint; distance: number }) | null)
-
-    if (!nearestPoint || nearestPoint.distance > FORECAST_POINT_CAPTURE_RADIUS_PX) {
-      return null
-    }
-
-    return nearestPoint
-  }
-
-  function handleHistoricalForecastEnter(surface: HistoricalForecastSurface) {
-    if (pinnedSurfaceKey) {
+  function handleChartMouseDown(event: React.MouseEvent<SVGSVGElement>) {
+    if (chartLayout.isTouch || event.button !== 0 || visibleDates.length < 2 || !svgRef.current) {
       return
     }
-
-    clearHideTimeout()
-    setArmedAccuracyKey(null)
-    setActivePoint(null)
-    setActiveTooltip(surface)
-  }
-
-  function activateHistoricalForecastSurface(surface: HistoricalForecastSurface) {
-    setArmedAccuracyKey(null)
-    pinSurface(surface, 'historical-forecast')
-  }
-
-  function handleChartMouseDown(event: React.MouseEvent<SVGElement>) {
-    if (chartLayout.isTouch || event.button !== 0 || visibleDatesForZoom.length < 2 || !svgRef.current) {
-      return
-    }
-
-    suppressSurfaceClickRef.current = false
-    setActivePoint(null)
-    setActiveTooltip(null)
-    setArmedAccuracyKey(null)
 
     const rect = svgRef.current.getBoundingClientRect()
     const startX = chartXFromClientX(event.clientX, rect, chartLayout)
-    const nextSelection = { startX, currentX: startX }
-    dragSelectionRef.current = nextSelection
-    setDragSelection(nextSelection)
-
-    attachWindowDragListeners()
+    setDragSelection({ startX, currentX: startX })
   }
 
-  function handleChartMouseMove(event: React.MouseEvent<SVGElement>) {
-    const activeDragSelection = dragSelectionRef.current
-
-    if (!activeDragSelection || !svgRef.current) {
+  function handleChartMouseMove(event: React.MouseEvent<SVGSVGElement>) {
+    if (!dragSelection || !svgRef.current) {
+      handleSharedDateChange(resolveDateFromPointerClientX(event.clientX))
       return
     }
 
     const rect = svgRef.current.getBoundingClientRect()
-    const nextSelection = { ...activeDragSelection, currentX: chartXFromClientX(event.clientX, rect, chartLayout) }
-    dragSelectionRef.current = nextSelection
-    setDragSelection(nextSelection)
+    setDragSelection({ ...dragSelection, currentX: chartXFromClientX(event.clientX, rect, chartLayout) })
   }
 
   function commitZoomSelection() {
-    const activeDragSelection = dragSelectionRef.current
-
-    detachWindowDragListeners()
-
-    if (!activeDragSelection || visibleDatesForZoom.length < 2) {
-      dragSelectionRef.current = null
+    if (!dragSelection || visibleDates.length < 2) {
       setDragSelection(null)
       return
     }
 
-    const startX = Math.min(activeDragSelection.startX, activeDragSelection.currentX)
-    const endX = Math.max(activeDragSelection.startX, activeDragSelection.currentX)
+    const startX = Math.min(dragSelection.startX, dragSelection.currentX)
+    const endX = Math.max(dragSelection.startX, dragSelection.currentX)
 
-    if (!shouldCommitZoomSelection(startX, endX, ZOOM_DRAG_THRESHOLD_PX)) {
-      dragSelectionRef.current = null
+    if (endX - startX < 12) {
       setDragSelection(null)
       return
     }
 
-    suppressSurfaceClickRef.current = true
+    const startDate = dateFromChartX(startX, visibleDates, chartLayout)
+    const endDate = dateFromChartX(endX, visibleDates, chartLayout)
 
-    const startDate = dateFromChartX(startX, visibleDatesForZoom, chartLayout)
-    const endDate = dateFromChartX(endX, visibleDatesForZoom, chartLayout)
-
-    dragSelectionRef.current = null
     setDragSelection(null)
 
     if (!startDate || !endDate || startDate === endDate) {
@@ -1741,44 +1503,6 @@ function ChartPanel({
         ? { start: startDate, end: endDate }
         : { start: endDate, end: startDate },
     )
-  }
-
-  function attachWindowDragListeners() {
-    detachWindowDragListeners()
-
-    const handleWindowMouseMove = (event: MouseEvent) => {
-      const activeDragSelection = dragSelectionRef.current
-
-      if (!activeDragSelection || !svgRef.current) {
-        return
-      }
-
-      const rect = svgRef.current.getBoundingClientRect()
-      const nextSelection = { ...activeDragSelection, currentX: chartXFromClientX(event.clientX, rect, chartLayout) }
-      dragSelectionRef.current = nextSelection
-      setDragSelection(nextSelection)
-    }
-
-    const handleWindowMouseUp = () => {
-      commitZoomSelection()
-    }
-
-    windowDragMoveHandlerRef.current = handleWindowMouseMove
-    windowDragUpHandlerRef.current = handleWindowMouseUp
-    window.addEventListener('mousemove', handleWindowMouseMove)
-    window.addEventListener('mouseup', handleWindowMouseUp)
-  }
-
-  function detachWindowDragListeners() {
-    if (windowDragMoveHandlerRef.current) {
-      window.removeEventListener('mousemove', windowDragMoveHandlerRef.current)
-      windowDragMoveHandlerRef.current = null
-    }
-
-    if (windowDragUpHandlerRef.current) {
-      window.removeEventListener('mouseup', windowDragUpHandlerRef.current)
-      windowDragUpHandlerRef.current = null
-    }
   }
 
   return (
@@ -1808,20 +1532,6 @@ function ChartPanel({
         </div>
       </div>
 
-      {accuracyPresentationMode === 'historical-forecast' && historicalForecastState === 'loading' ? (
-        <div className="chart-layer-status" role="status" aria-live="polite">
-          <strong>{locale === 'pl' ? 'Ładowanie warstwy historycznej prognozy' : 'Loading historical forecast layer'}</strong>
-          <span>{locale === 'pl' ? 'Główny wykres pozostaje dostępny podczas przygotowania porównania.' : 'The main chart remains available while the comparison layer is prepared.'}</span>
-        </div>
-      ) : null}
-
-      {accuracyPresentationMode === 'historical-forecast' && historicalForecastMessage ? (
-        <div className={`chart-layer-status${historicalForecastState === 'error' ? ' is-error' : ''}`} role="status" aria-live="polite">
-          <strong>{historicalForecastState === 'error' ? (locale === 'pl' ? 'Warstwa historycznej prognozy jest chwilowo niedostępna' : 'Historical forecast layer is temporarily unavailable') : historicalForecastLabel}</strong>
-          <span>{historicalForecastMessage}</span>
-        </div>
-      ) : null}
-
       <div
         ref={chartSurfaceRef}
         className="chart-surface"
@@ -1835,11 +1545,6 @@ function ChartPanel({
           role="img"
           aria-label="Time series chart"
           onClick={(event) => {
-            if (suppressSurfaceClickRef.current) {
-              suppressSurfaceClickRef.current = false
-              return
-            }
-
             const target = event.target as Element
 
             if (target.closest('.chart-hit-area')) {
@@ -1854,7 +1559,7 @@ function ChartPanel({
           onMouseLeave={() => {
             commitZoomSelection()
             clearHideTimeout()
-            hideTooltipTimeoutRef.current = setTimeout(() => setActivePoint(null), TOOLTIP_HIDE_DELAY_MS)
+            hideTooltipTimeoutRef.current = setTimeout(() => setActiveDate(null), TOOLTIP_HIDE_DELAY_MS)
           }}
         >
         <line x1={chartLayout.paddingLeft} y1={chartLayout.height - chartLayout.paddingBottom} x2={chartLayout.width - chartLayout.paddingRight} y2={chartLayout.height - chartLayout.paddingBottom} className="chart-axis" />
@@ -1863,14 +1568,6 @@ function ChartPanel({
         {tooltipAnchorPoint ? (
           <g className="chart-crosshair">
             <line x1={tooltipAnchorPoint.x} y1={chartLayout.paddingTop} x2={tooltipAnchorPoint.x} y2={chartLayout.height - chartLayout.paddingBottom} className="chart-crosshair-line is-vertical" />
-            <line x1={chartLayout.paddingLeft} y1={tooltipAnchorPoint.pointY} x2={chartLayout.width - chartLayout.paddingRight} y2={tooltipAnchorPoint.pointY} className="chart-crosshair-line is-horizontal" />
-            <line
-              x1={tooltipAnchorPoint.x}
-              y1={tooltipAnchorPoint.pointY}
-              x2={tooltipAnchorPoint.x + ((tooltipPosition?.placement.endsWith('right') ?? true) ? TOOLTIP_OFFSET - 4 : -(TOOLTIP_OFFSET - 4))}
-              y2={tooltipAnchorPoint.pointY + ((tooltipPosition?.placement.startsWith('bottom') ?? false) ? TOOLTIP_OFFSET - 4 : -(TOOLTIP_OFFSET - 4))}
-              className="chart-crosshair-line is-leader"
-            />
           </g>
         ) : null}
 
@@ -1900,6 +1597,10 @@ function ChartPanel({
           )
         })}
 
+        {historicalForecastDeltaPath ? (
+          <path d={historicalForecastDeltaPath} className="chart-delta-area historical-forecast" />
+        ) : null}
+
         {visibleSeries.map((entry, index) => {
           const polyline = buildPolylinePoints(entry.points, minimum, maximum, pointX, chartLayout)
 
@@ -1908,8 +1609,7 @@ function ChartPanel({
               {polyline ? <polyline points={polyline} className={`chart-line ${legendClass(entry.kind)}`} /> : null}
               {entry.points.filter((point) => point.value !== null).map((point) => {
                 const isSelected = isSelectedSeriesPoint(point, entry.kind)
-                const isHovered = isHoveredSeriesPoint(point)
-                const showMarker = point.anchor || activePoint?.key === point.key || isSelected
+                const showMarker = point.anchor || activeDate === point.date || selectedDate === point.date || isSelected
 
                 return (
                   <g key={point.key}>
@@ -1920,32 +1620,36 @@ function ChartPanel({
                       className="chart-hit-area"
                       onMouseDown={(event) => event.stopPropagation()}
                       onPointerDown={(event) => event.stopPropagation()}
-                      onMouseEnter={() => handlePointEnter(point)}
-                      onMouseLeave={() => handlePointLeave(point.key)}
-                      onFocus={() => handlePointEnter(point)}
-                      onBlur={() => handlePointLeave(point.key)}
+                      onMouseEnter={() => handleSharedDateChange(point.date)}
+                      onMouseLeave={handleSharedDateLeave}
+                      onFocus={() => handleSharedDateChange(point.date)}
+                      onBlur={handleSharedDateLeave}
                       onClick={(event) => {
                         event.stopPropagation()
-                        pinSurface(point, entry.kind)
+                        setSelectedSurfaceKey(null)
+                        setSelectedDate(point.date)
+                        setSelectedSurface(null)
+                        setSelectedSurfaceVariant(null)
+                        setActiveDate(null)
+                        setActiveTooltip(null)
+                        setArmedAccuracyKey(null)
                       }}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
                           event.preventDefault()
-                          pinSurface(point, entry.kind)
+                          setSelectedSurfaceKey(null)
+                          setSelectedDate(point.date)
+                          setSelectedSurface(null)
+                          setSelectedSurfaceVariant(null)
+                          setActiveDate(null)
+                          setActiveTooltip(null)
+                          setArmedAccuracyKey(null)
                         }
                       }}
                       role="button"
                       tabIndex={0}
                       aria-label={`${formatSeriesLabel(locale, entry.kind)} ${formatDate(locale, point.date)} ${formatPrimaryValue(locale, point.value, point.detailModel.unit, point.detailModel.currency)}`}
                     />
-                    {isHovered ? (
-                      <circle
-                        cx={pointX(point.date)}
-                        cy={pointY(point.value)}
-                        r={7.5}
-                        className={`chart-hover-ring ${legendClass(entry.kind)}`}
-                      />
-                    ) : null}
                     {isSelected ? (
                       <circle
                         cx={pointX(point.date)}
@@ -1968,288 +1672,6 @@ function ChartPanel({
             </g>
           )
         })}
-        {accuracyPresentationMode === 'historical-forecast' && historicalForecastDeltaSegments.map((segment, index) => {
-          const areaPoints = segment.points
-            .map((point) => `${pointX(point.date)},${pointY(point.value)}`)
-            .join(' ')
-
-          return (
-            <polygon
-              key={`historical-forecast-delta-${segment.sign}-${index}`}
-              points={areaPoints}
-              className={`chart-historical-forecast-delta is-${segment.sign}`}
-            />
-          )
-        })}
-        {accuracyPresentationMode === 'historical-forecast' && historicalForecastLineSegments.map((segment, index) => {
-          const polyline = segment.points
-            .map((point) => `${pointX(point.date)},${pointY(point.forecastValue)}`)
-            .join(' ')
-
-          return (
-            <polyline
-              key={`historical-forecast-line-${index}`}
-              points={polyline}
-              className="chart-line historical-forecast"
-            />
-          )
-        })}
-        {accuracyPresentationMode === 'historical-forecast' && visibleHistoricalForecastPoints.length > 0 ? (
-          <g className="chart-historical-forecast-layer">
-            <path
-              d={(() => {
-                const values = visibleHistoricalForecastPoints
-                if (values.length === 0) {
-                  return ''
-                }
-
-                const first = values[0]
-                return `M ${pointX(first.date)} ${chartLayout.paddingTop} L ${pointX(first.date)} ${chartLayout.height - chartLayout.paddingBottom}`
-              })()}
-              className="chart-historical-forecast-helper"
-            />
-            <rect
-              x={chartLayout.paddingLeft}
-              y={chartLayout.paddingTop}
-              width={chartLayout.width - chartLayout.paddingLeft - chartLayout.paddingRight}
-              height={chartLayout.height - chartLayout.paddingTop - chartLayout.paddingBottom}
-              className="chart-hit-area chart-hit-area-historical-forecast"
-              onMouseMove={(event) => {
-                if (event.buttons === 1) {
-                  handleChartMouseMove(event)
-                  return
-                }
-
-                const forecastPoint = resolveForecastPointFromEvent(event)
-
-                if (forecastPoint) {
-                  handlePointEnter(forecastPoint.point)
-                  return
-                }
-
-                const surface = resolveNearestHistoricalForecastSurface(event, visibleHistoricalForecastPoints)
-
-                if (surface) {
-                  handleHistoricalForecastEnter(surface)
-                }
-              }}
-              onMouseLeave={() => handleTooltipSurfaceLeave(selectedSurfaceVariant === 'historical-forecast' && selectedSurface ? selectedSurface.key : 'historical-forecast-layer')}
-              onClick={(event) => {
-                event.stopPropagation()
-
-                if (suppressSurfaceClickRef.current) {
-                  suppressSurfaceClickRef.current = false
-                  return
-                }
-
-                const forecastPoint = resolveForecastPointFromEvent(event)
-
-                if (forecastPoint) {
-                  pinSurface(forecastPoint.point, forecastPoint.entry.kind)
-                  return
-                }
-
-                const surface = resolveNearestHistoricalForecastSurface(event, visibleHistoricalForecastPoints)
-
-                if (surface) {
-                  activateHistoricalForecastSurface(surface)
-                }
-              }}
-              onMouseDown={handleChartMouseDown}
-              onMouseUp={commitZoomSelection}
-              role="button"
-              tabIndex={0}
-              aria-label={historicalForecastLabel}
-            />
-          </g>
-        ) : null}
-        {accuracyPresentationMode === 'historical-forecast' && visibleSeries
-          .filter((entry) => entry.kind === 'historical')
-          .flatMap((entry) => entry.points.filter((point) => point.value !== null).map((point) => ({ entry, point })))
-          .map(({ entry, point }) => (
-            <circle
-              key={`historical-overlay-hit-${point.key}`}
-              cx={pointX(point.date)}
-              cy={pointY(point.value)}
-              r={8}
-              className="chart-hit-area"
-              onMouseDown={(event) => event.stopPropagation()}
-              onPointerDown={(event) => event.stopPropagation()}
-              onMouseEnter={() => handlePointEnter(point)}
-              onMouseLeave={() => handlePointLeave(point.key)}
-              onClick={(event) => {
-                event.stopPropagation()
-                pinSurface(point, entry.kind)
-              }}
-            />
-          ))}
-        {accuracyPresentationMode === 'historical-forecast' && visibleHistoricalForecastPoints.map((point) => {
-          const surface = toHistoricalForecastSurface(
-            locale,
-            point,
-            payload?.title ?? point.key,
-            historicalForecastComparison!.horizonMonths,
-          )
-          const isSelected = selectedSurfaceVariant === 'historical-forecast' && pinnedSurfaceKey === surface.key
-          const isHovered = !isSelected && activeTooltip?.key === surface.key
-          const showMarker = isSelected || isHovered
-
-          return (
-            <g key={`historical-forecast-point-${surface.key}`}>
-              <circle
-                cx={pointX(point.date)}
-                cy={pointY(point.forecastValue)}
-                r={13}
-                className="chart-hit-area chart-hit-area-historical-forecast"
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onMouseEnter={() => handleHistoricalForecastEnter(surface)}
-                onMouseLeave={() => handleTooltipSurfaceLeave(surface.key)}
-                onFocus={() => handleHistoricalForecastEnter(surface)}
-                onBlur={() => handleTooltipSurfaceLeave(surface.key)}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  activateHistoricalForecastSurface(surface)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    activateHistoricalForecastSurface(surface)
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-                aria-label={`${historicalForecastLabel} ${formatDate(locale, point.date)} ${formatPrimaryValue(locale, point.forecastValue, payload.unit, payload.currency)}`}
-              />
-              {isHovered ? (
-                <circle
-                  cx={pointX(point.date)}
-                  cy={pointY(point.forecastValue)}
-                  r={7.5}
-                  className="chart-hover-ring historical-forecast"
-                />
-              ) : null}
-              {isSelected ? (
-                <circle
-                  cx={pointX(point.date)}
-                  cy={pointY(point.forecastValue)}
-                  r={10}
-                  className="chart-selection-ring historical-forecast"
-                />
-              ) : null}
-              {showMarker ? (
-                <circle
-                  cx={pointX(point.date)}
-                  cy={pointY(point.forecastValue)}
-                  r={3.25}
-                  className={`chart-point historical-forecast${isSelected ? ' is-selected' : ''}`}
-                />
-              ) : null}
-            </g>
-          )
-        })}
-        {accuracyPresentationMode === 'historical-forecast' && visibleSeries
-          .filter((entry) => entry.kind !== 'historical')
-          .flatMap((entry) => entry.points.filter((point) => point.value !== null).map((point) => ({ entry, point })))
-          .map(({ entry, point }) => (
-            <circle
-              key={`forecast-overlay-hit-${point.key}`}
-              cx={pointX(point.date)}
-              cy={pointY(point.value)}
-              r={13}
-              className={`chart-hit-area chart-hit-area-forecast-overlay ${entry.kind}`}
-              onMouseDown={(event) => event.stopPropagation()}
-              onPointerDown={(event) => {
-                event.stopPropagation()
-
-                if (!event.isPrimary || event.button !== 0) {
-                  return
-                }
-
-                handledSurfaceMouseDownKeyRef.current = point.key
-                pinSurface(point, entry.kind)
-              }}
-              onMouseEnter={() => handlePointEnter(point)}
-              onMouseLeave={() => handlePointLeave(point.key)}
-              onFocus={() => handlePointEnter(point)}
-              onBlur={() => handlePointLeave(point.key)}
-              onClick={(event) => {
-                event.stopPropagation()
-
-                if (handledSurfaceMouseDownKeyRef.current === point.key) {
-                  handledSurfaceMouseDownKeyRef.current = null
-                  return
-                }
-
-                pinSurface(point, entry.kind)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' || event.key === ' ') {
-                  event.preventDefault()
-                  pinSurface(point, entry.kind)
-                }
-              }}
-              role="button"
-              tabIndex={0}
-              aria-label={`${formatSeriesLabel(locale, entry.kind)} ${formatDate(locale, point.date)} ${formatPrimaryValue(locale, point.value, point.detailModel.unit, point.detailModel.currency)}`}
-            />
-          ))}
-        {accuracyMarkers.map((marker) => {
-          const axisY = chartLayout.height - chartLayout.paddingBottom
-          const unclampedMarkerY = pointY(marker.value) + (marker.diff >= 0 ? -16 : 18)
-          const markerY = Math.max(
-            chartLayout.paddingTop + ACCURACY_MARKER_TOP_CLEARANCE,
-            Math.min(unclampedMarkerY, axisY - ACCURACY_MARKER_AXIS_CLEARANCE),
-          )
-          const isSelected = selectedSurfaceVariant === 'forecast-accuracy' && pinnedSurfaceKey === marker.key
-          const isArmed = armedAccuracyKey === marker.key || activeTooltip?.key === marker.key || isSelected
-
-          return (
-            <g key={marker.key} className={`chart-accuracy-layer${isArmed ? ' is-armed' : ''}`}>
-              <circle
-                cx={pointX(marker.date)}
-                cy={markerY - 2}
-                r={22}
-                className="chart-hit-area chart-hit-area-accuracy"
-                onMouseDown={(event) => event.stopPropagation()}
-                onPointerDown={(event) => event.stopPropagation()}
-                onMouseEnter={() => armAccuracyMarker(marker)}
-                onMouseLeave={() => handleTooltipSurfaceLeave(marker.key)}
-                onFocus={() => armAccuracyMarker(marker)}
-                onBlur={() => handleTooltipSurfaceLeave(marker.key)}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  activateAccuracyMarker(marker)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' || event.key === ' ') {
-                    event.preventDefault()
-                    activateAccuracyMarker(marker)
-                  }
-                }}
-                role="button"
-                tabIndex={0}
-                aria-label={`${formatSeriesLabel(locale, 'forecast-accuracy')} ${formatDate(locale, marker.date)} ${formatSignedDiff(locale, marker.diff)}`}
-              />
-              {isSelected ? (
-                <circle
-                  cx={pointX(marker.date)}
-                  cy={markerY - 2}
-                  r={12}
-                  className={`chart-selection-ring forecast-accuracy ${marker.diff >= 0 ? 'is-positive' : 'is-negative'}`}
-                />
-              ) : null}
-              <text
-                x={pointX(marker.date)}
-                y={markerY}
-                textAnchor="middle"
-                className={`chart-accuracy-marker ${marker.diff >= 0 ? 'is-positive' : 'is-negative'}${isArmed ? ' is-armed' : ''}`}
-              >
-                {marker.diff >= 0 ? '↑' : '↓'}
-              </text>
-            </g>
-          )
-        })}
         {dragSelection ? (
           <rect
             x={Math.min(dragSelection.startX, dragSelection.currentX)}
@@ -2261,18 +1683,17 @@ function ChartPanel({
         ) : null}
         </svg>
 
-        {!chartLayout.isTouch && !useCompactTooltipRail && displayTooltip && tooltipCard ? (
+        {!chartLayout.isTouch && !useCompactTooltipRail && displaySurfaceTooltip && tooltipCard ? (
           <div
             ref={tooltipRef}
             className={`chart-tooltip${tooltipPosition ? ` is-${tooltipPosition.placement}` : ''}${tooltipVariant ? ` ${tooltipVariantClass(tooltipVariant)}` : ''}`}
             onMouseEnter={clearHideTimeout}
-            onMouseLeave={() => handleTooltipSurfaceLeave(displayTooltip.key)}
+            onMouseLeave={() => handleTooltipSurfaceLeave(displaySurfaceTooltip.key)}
             style={{
               left: tooltipPosition ? `${tooltipPosition.left}px` : '-999px',
               top: tooltipPosition ? `${tooltipPosition.top}px` : '-999px',
             }}
           >
-            {isTooltipPinned ? <div className="chart-tooltip-status">{pinnedTooltipLabel}</div> : null}
             <div className="chart-tooltip-series">{tooltipCard.series}</div>
             <div className="chart-tooltip-component">{tooltipCard.component}</div>
             <strong>{tooltipCard.date}</strong>
@@ -2302,7 +1723,7 @@ function ChartPanel({
                 <div className="chart-tooltip-divider" />
                 <dl>
                   {tooltipCard.detailRows.map((row) => (
-                    <div key={`${displayTooltip.key}-detail-${row.label}`} className="tooltip-row">
+                    <div key={`${displaySurfaceTooltip.key}-detail-${row.label}`} className="tooltip-row">
                       <dt>{row.label}</dt>
                       <dd>{row.value}</dd>
                     </div>
@@ -2315,20 +1736,48 @@ function ChartPanel({
                 <div className="chart-tooltip-divider" />
                 <div className="chart-tooltip-business-lines">
                   {tooltipCard.businessDescriptionLines.map((line) => (
-                    <span key={`${displayTooltip.key}-${line}`}>{line}</span>
+                    <span key={`${displaySurfaceTooltip.key}-${line}`}>{line}</span>
                   ))}
                 </div>
               </>
             ) : null}
           </div>
         ) : null}
+
+        {!chartLayout.isTouch && !useCompactTooltipRail && !displaySurfaceTooltip && hasSharedTooltipRows(sharedTooltipCard) ? (
+          <div
+            ref={tooltipRef}
+            className={`chart-tooltip is-shared${tooltipPosition ? ` is-${tooltipPosition.placement}` : ''}`}
+            onMouseEnter={clearHideTimeout}
+            onMouseLeave={handleSharedDateLeave}
+            style={{
+              left: tooltipPosition ? `${tooltipPosition.left}px` : '-999px',
+              top: tooltipPosition ? `${tooltipPosition.top}px` : '-999px',
+            }}
+          >
+            <div className="chart-tooltip-series">{locale === 'pl' ? 'Wartości biznesowe' : 'Business values'}</div>
+            <div className="chart-tooltip-component">{sharedTooltipCard?.component}</div>
+            <strong>{sharedTooltipCard?.date}</strong>
+            <div className="chart-tooltip-divider" />
+            <dl className="chart-tooltip-shared-list">
+              {sharedTooltipCard?.rows.filter((row) => !row.isMissing).map((row) => (
+                <div key={row.key} className="tooltip-row tooltip-row-shared">
+                  <dt>
+                    <span className={`chart-tooltip-series-dot ${legendClass(row.kind)} ${row.lineStyle === 'dashed' ? 'is-dashed' : ''}`} aria-hidden="true" />
+                    {row.label}
+                  </dt>
+                  <dd>{row.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ) : null}
       </div>
 
       {chartLayout.isTouch || useCompactTooltipRail ? (
-        <div className={`chart-tooltip-mobile-wrap${displayTooltip && tooltipCard ? ' is-active' : ' is-reserved'}`}>
-          {displayTooltip && tooltipCard ? (
+        <div className={`chart-tooltip-mobile-wrap${(displaySurfaceTooltip && tooltipCard) || hasSharedTooltipRows(sharedTooltipCard) ? ' is-active' : ' is-reserved'}`}>
+          {displaySurfaceTooltip && tooltipCard ? (
           <div ref={tooltipRef} className={`chart-tooltip${tooltipVariant ? ` ${tooltipVariantClass(tooltipVariant)}` : ''}`}>
-            {isTooltipPinned ? <div className="chart-tooltip-status">{pinnedTooltipLabel}</div> : null}
             <div className="chart-tooltip-series">{tooltipCard.series}</div>
             <div className="chart-tooltip-component">{tooltipCard.component}</div>
             <strong>{tooltipCard.date}</strong>
@@ -2358,7 +1807,7 @@ function ChartPanel({
                 <div className="chart-tooltip-divider" />
                 <dl>
                   {tooltipCard.detailRows.map((row) => (
-                    <div key={`${displayTooltip.key}-mobile-detail-${row.label}`} className="tooltip-row">
+                    <div key={`${displaySurfaceTooltip.key}-mobile-detail-${row.label}`} className="tooltip-row">
                       <dt>{row.label}</dt>
                       <dd>{row.value}</dd>
                     </div>
@@ -2371,12 +1820,30 @@ function ChartPanel({
                 <div className="chart-tooltip-divider" />
                 <div className="chart-tooltip-business-lines">
                   {tooltipCard.businessDescriptionLines.map((line) => (
-                    <span key={`${displayTooltip.key}-mobile-${line}`}>{line}</span>
+                    <span key={`${displaySurfaceTooltip.key}-mobile-${line}`}>{line}</span>
                   ))}
                 </div>
               </>
             ) : null}
           </div>
+          ) : hasSharedTooltipRows(sharedTooltipCard) ? (
+            <div ref={tooltipRef} className="chart-tooltip is-shared">
+              <div className="chart-tooltip-series">{locale === 'pl' ? 'Wartości biznesowe' : 'Business values'}</div>
+              <div className="chart-tooltip-component">{sharedTooltipCard?.component}</div>
+              <strong>{sharedTooltipCard?.date}</strong>
+              <div className="chart-tooltip-divider" />
+              <dl className="chart-tooltip-shared-list">
+                {sharedTooltipCard?.rows.filter((row) => !row.isMissing).map((row) => (
+                  <div key={`${row.key}-mobile`} className="tooltip-row tooltip-row-shared">
+                    <dt>
+                      <span className={`chart-tooltip-series-dot ${legendClass(row.kind)} ${row.lineStyle === 'dashed' ? 'is-dashed' : ''}`} aria-hidden="true" />
+                      {row.label}
+                    </dt>
+                    <dd>{row.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -2399,28 +1866,6 @@ function ChartPanel({
               </button>
             )
           })}
-          {accuracyPresentationMode === 'percentage-arrows' ? (
-            <button
-              type="button"
-              className={`chart-legend-button${hiddenItems.includes('forecast-accuracy') ? ' is-muted' : ''}`}
-              aria-pressed={!hiddenItems.includes('forecast-accuracy')}
-              onClick={() => toggleVisibility('forecast-accuracy')}
-            >
-              <i className="legend-accuracy-icon">↑</i>
-              {forecastAccuracyLabel}
-            </button>
-          ) : null}
-          {accuracyPresentationMode === 'historical-forecast' ? (
-            <button
-              type="button"
-              className={`chart-legend-button${hiddenItems.includes('historical-forecast') ? ' is-muted' : ''}`}
-              aria-pressed={!hiddenItems.includes('historical-forecast')}
-              onClick={() => toggleVisibility('historical-forecast')}
-            >
-              <i className="legend-swatch legend-historical-forecast" />
-              {historicalForecastLabel}
-            </button>
-          ) : null}
         </div>
 
         <div className="source-legend">
@@ -2448,25 +1893,18 @@ export function RawDataView() {
   const [componentSearch, setComponentSearch] = useState('')
   const [benchmarkSearch, setBenchmarkSearch] = useState('')
   const [showForecast, setShowForecast] = useState(false)
-  const [accuracyPresentationMode, setAccuracyPresentationMode] = useState<AccuracyPresentationMode>('off')
-  const [historicalForecastState, setHistoricalForecastState] = useState<HistoricalForecastLayerState>('idle')
-  const [historicalForecastMessage, setHistoricalForecastMessage] = useState<string | null>(null)
-  const [historicalForecastHorizon, setHistoricalForecastHorizon] = useState<ForecastAccuracyHorizonMonths | null>(null)
-  const [historicalForecastAvailableHorizons, setHistoricalForecastAvailableHorizons] = useState<ForecastAccuracyHorizonMonths[]>([])
-  const [historicalForecastResponse, setHistoricalForecastResponse] = useState<ForecastAccuracyResponse | null>(null)
-  const [historicalForecastReloadNonce, setHistoricalForecastReloadNonce] = useState(0)
-  const [isHorizonInfoOpen, setIsHorizonInfoOpen] = useState(false)
+  const [showForecastAccuracy, setShowForecastAccuracy] = useState(false)
+  const [forecastAccuracyHorizon, setForecastAccuracyHorizon] = useState<ForecastAccuracyHorizonMonths>(1)
+  const [forecastAccuracyState, setForecastAccuracyState] = useState<LoadState>('idle')
+  const [forecastAccuracyResponse, setForecastAccuracyResponse] = useState<ForecastAccuracyResponse | null>(null)
+  const [forecastAccuracyPayload, setForecastAccuracyPayload] = useState<TimeSeriesViewerPayload | null>(null)
   const [series, setSeries] = useState<SeriesResponse | null>(null)
   const [viewerPayload, setViewerPayload] = useState<TimeSeriesViewerPayload | null>(null)
   const seriesAbortRef = useRef<AbortController | null>(null)
+  const forecastAccuracyAbortRef = useRef<AbortController | null>(null)
   const seriesCacheRef = useRef<Map<string, CachedSeriesEntry>>(new Map())
-  const historicalForecastCacheRef = useRef<Map<string, CachedForecastAccuracyEntry>>(new Map())
-  const historicalForecastPendingRequestsRef = useRef<Map<string, Promise<ForecastAccuracyResponse>>>(new Map())
-  const horizonInfoRef = useRef<HTMLDivElement | null>(null)
-  const horizonInfoId = useId()
 
   const selectedComponent = components.find((item) => item.componentName === selectedComponentName) ?? null
-  const showForecastAccuracy = accuracyPresentationMode !== 'off'
   const benchmarkRequired = (selectedComponent?.benchmarkCount ?? 0) > 1 && selectedComponentCode.length === 0
   const effectiveComponentCode = selectedComponent?.benchmarkCount === 1
     ? (selectedComponent.availableBenchmarks[0]?.componentCode ?? '')
@@ -2484,49 +1922,6 @@ export function RawDataView() {
     setErrorMessage(null)
     setReloadNonce((current) => current + 1)
   }
-
-  function retryHistoricalForecast() {
-    setHistoricalForecastMessage(null)
-    setHistoricalForecastState('idle')
-    setHistoricalForecastResponse(null)
-    setHistoricalForecastReloadNonce((current) => current + 1)
-  }
-
-  useEffect(() => {
-    if (accuracyPresentationMode !== 'historical-forecast') {
-      setIsHorizonInfoOpen(false)
-    }
-  }, [accuracyPresentationMode])
-
-  useEffect(() => {
-    if (!isHorizonInfoOpen) {
-      return
-    }
-
-    function handleWindowPointerDown(event: PointerEvent) {
-      const target = event.target as Node
-
-      if (horizonInfoRef.current?.contains(target)) {
-        return
-      }
-
-      setIsHorizonInfoOpen(false)
-    }
-
-    function handleWindowKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        setIsHorizonInfoOpen(false)
-      }
-    }
-
-    window.addEventListener('pointerdown', handleWindowPointerDown)
-    window.addEventListener('keydown', handleWindowKeyDown)
-
-    return () => {
-      window.removeEventListener('pointerdown', handleWindowPointerDown)
-      window.removeEventListener('keydown', handleWindowKeyDown)
-    }
-  }, [isHorizonInfoOpen])
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -2603,18 +1998,9 @@ export function RawDataView() {
     setBenchmarkSearch('')
     setSeries(null)
     setViewerPayload(null)
-    setHistoricalForecastAvailableHorizons([])
-    setHistoricalForecastResponse(null)
-    setHistoricalForecastMessage(null)
-    setHistoricalForecastState('idle')
+    setForecastAccuracyResponse(null)
+    setForecastAccuracyPayload(null)
   }, [selectedComponentName])
-
-  useEffect(() => {
-    setHistoricalForecastAvailableHorizons([])
-    setHistoricalForecastResponse(null)
-    setHistoricalForecastMessage(null)
-    setHistoricalForecastState('idle')
-  }, [effectiveComponentCode, locale])
 
   useEffect(() => {
     if (!selectedComponentName) {
@@ -2796,158 +2182,76 @@ export function RawDataView() {
   }, [benchmarkRequired, effectiveComponentCode, locale, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t, reloadNonce])
 
   useEffect(() => {
-    if (accuracyPresentationMode !== 'historical-forecast' || benchmarkRequired || !effectiveComponentCode || !selectedComponentName) {
-      if (accuracyPresentationMode !== 'historical-forecast') {
-        setHistoricalForecastState((current) => current === 'unavailable' ? current : 'idle')
-      }
-
+    if (!showForecastAccuracy || !selectedComponentName || benchmarkRequired || !effectiveComponentCode) {
+      forecastAccuracyAbortRef.current?.abort()
+      setForecastAccuracyState('idle')
+      setForecastAccuracyResponse(null)
+      setForecastAccuracyPayload(null)
       return
     }
 
     let cancelled = false
+    forecastAccuracyAbortRef.current?.abort()
+    const controller = new AbortController()
+    forecastAccuracyAbortRef.current = controller
 
-    if (
-      historicalForecastResponse
-      && historicalForecastResponse.selection.benchmarkCode === effectiveComponentCode
-      && historicalForecastHorizon !== null
-      && historicalForecastResponse.selection.horizonMonths === historicalForecastHorizon
-      && historicalForecastAvailableHorizons.length > 0
-    ) {
-      return () => {
-        cancelled = true
-      }
-    }
+    async function loadForecastAccuracy() {
+      setForecastAccuracyState('loading')
 
-    async function fetchForecastAccuracy(nextHorizon: ForecastAccuracyHorizonMonths | null) {
-      const params = new URLSearchParams({
-        locale,
-        componentName: selectedComponentName,
-        componentCode: effectiveComponentCode,
-      })
-
-      if (nextHorizon !== null) {
-        params.set('horizonMonths', String(nextHorizon))
-      }
-
-      const cacheKey = buildForecastAccuracyCacheKey({
-        locale,
-        organizationId: null,
-        benchmarkCode: effectiveComponentCode,
-        horizonMonths: nextHorizon,
-        dateFrom: null,
-        dateTo: null,
-      })
-      const cached = historicalForecastCacheRef.current.get(cacheKey)
-
-      if (cached && Date.now() - cached.cachedAt <= CLIENT_SERIES_CACHE_TTL_MS) {
-        return cached.response
-      }
-
-      const pendingRequest = historicalForecastPendingRequestsRef.current.get(cacheKey)
-
-      if (pendingRequest) {
-        return pendingRequest
-      }
-
-      const nextRequest = (async () => {
+      try {
+        const params = new URLSearchParams({
+          locale,
+          componentName: selectedComponentName,
+          componentCode: effectiveComponentCode,
+          horizonMonths: String(forecastAccuracyHorizon),
+        })
         const response = await fetch(`/api/forecast-accuracy?${params.toString()}`, {
           cache: 'no-store',
+          signal: controller.signal,
         })
-        const payload = await response.json() as ForecastAccuracyResponse | ForecastAccuracyErrorResponse
+        const payload = await response.json() as ForecastAccuracyResponse | { error?: { message?: string } }
 
         if (!response.ok) {
-          if (isForecastAccuracyErrorResponse(payload)) {
-            const error = new Error(payload.error.message)
-            ;(error as Error & { code?: string }).code = payload.error.code
-            throw error
-          }
-
-          throw new Error(t('errors.series'))
+          throw new Error('error' in payload ? payload.error?.message ?? t('errors.series') : t('errors.series'))
         }
-
-        const nextResponse = payload as ForecastAccuracyResponse
-        historicalForecastCacheRef.current.set(cacheKey, {
-          response: nextResponse,
-          cachedAt: Date.now(),
-        })
-        return nextResponse
-      })()
-
-      historicalForecastPendingRequestsRef.current.set(cacheKey, nextRequest)
-
-      try {
-        return await nextRequest
-      } finally {
-        historicalForecastPendingRequestsRef.current.delete(cacheKey)
-      }
-    }
-
-    async function loadHistoricalForecast() {
-      try {
-        setHistoricalForecastState('loading')
-        setHistoricalForecastMessage(null)
-
-        const discovery = await fetchForecastAccuracy(null)
 
         if (cancelled) {
           return
         }
 
-        const resolvedHorizon = selectPreferredAccuracyHorizon(
-          discovery.availableHorizons,
-          historicalForecastHorizon,
-        )
-
-        setHistoricalForecastAvailableHorizons(discovery.availableHorizons)
-
-        if (resolvedHorizon === null) {
-          setHistoricalForecastResponse(null)
-          setHistoricalForecastState('unavailable')
-          setHistoricalForecastMessage(t('historicalForecastUnavailableHint'))
-          return
-        }
-
-        if (historicalForecastHorizon !== resolvedHorizon) {
-          setHistoricalForecastHorizon(resolvedHorizon)
-          setHistoricalForecastState('idle')
-          return
-        }
-
-        const nextResponse = await fetchForecastAccuracy(resolvedHorizon)
-
-        if (cancelled) {
-          return
-        }
-
-        setHistoricalForecastResponse(nextResponse)
-        setHistoricalForecastState('ready')
+        const accuracyResponse = payload as ForecastAccuracyResponse
+        setForecastAccuracyResponse(accuracyResponse)
+        setForecastAccuracyPayload(toForecastAccuracyViewerPayload(accuracyResponse, locale))
+        setForecastAccuracyState('ready')
       } catch (error) {
-        if ((error as Error).name === 'AbortError' || cancelled) {
+        if (cancelled || (error as Error).name === 'AbortError') {
           return
         }
 
-        const code = (error as Error & { code?: string }).code
-
-        if (code === 'NO_ACCURACY_DATA') {
-          setHistoricalForecastAvailableHorizons([])
-          setHistoricalForecastResponse(null)
-          setHistoricalForecastState('unavailable')
-          setHistoricalForecastMessage(t('historicalForecastUnavailableHint'))
-          return
-        }
-
-        setHistoricalForecastResponse(null)
-        setHistoricalForecastState('error')
-        setHistoricalForecastMessage(t('historicalForecastErrorHint'))
+        setForecastAccuracyState('error')
+        setForecastAccuracyResponse(null)
+        setForecastAccuracyPayload(null)
+        setErrorMessage(toUiLoadErrorMessage(error, t('errors.series'), t('errors.timeout')))
       }
     }
 
-    void loadHistoricalForecast()
+    void loadForecastAccuracy()
 
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [accuracyPresentationMode, benchmarkRequired, effectiveComponentCode, historicalForecastHorizon, historicalForecastReloadNonce, locale, selectedComponentName])
+  }, [benchmarkRequired, effectiveComponentCode, forecastAccuracyHorizon, locale, selectedComponentName, showForecastAccuracy, t])
+
+  useEffect(() => {
+    if (!forecastAccuracyResponse) {
+      return
+    }
+
+    setForecastAccuracyPayload(toForecastAccuracyViewerPayload(forecastAccuracyResponse, locale))
+  }, [forecastAccuracyResponse, locale])
+
+  const activePayload = mergeAccuracyIntoViewerPayload(viewerPayload, forecastAccuracyPayload, showForecastAccuracy)
 
   return (
     <div className="shell-grid">
@@ -3016,114 +2320,49 @@ export function RawDataView() {
           ) : null}
 
           <div className="control-check-row">
-            <label className="control-check">
+            <label className="control-check control-check-inline">
               <input type="checkbox" checked={showForecast} onChange={(event) => setShowForecast(event.target.checked)} />
               <span>{t('showForecast')}</span>
             </label>
 
-            <label className="control-check">
-              <input
-                type="checkbox"
-                checked={showForecastAccuracy}
-                onChange={(event) => setAccuracyPresentationMode(event.target.checked ? 'percentage-arrows' : 'off')}
-              />
+            <label className="control-check control-check-inline">
+              <input type="checkbox" checked={showForecastAccuracy} onChange={(event) => setShowForecastAccuracy(event.target.checked)} />
               <span>{t('showForecastAccuracy')}</span>
             </label>
-          </div>
 
-          {showForecastAccuracy ? (
-            <div className="control-stack control-stack-accuracy">
-              <div className={`accuracy-controls-row${accuracyPresentationMode === 'historical-forecast' && historicalForecastAvailableHorizons.length > 0 ? ' accuracy-controls-row-historical-forecast' : ''}`}>
-                <div className="control-block control-segmented-block">
-                  <span>{t('accuracyPresentationMode')}</span>
-                  <div className="segmented-control" role="tablist" aria-label={t('accuracyPresentationMode')}>
-                    <button
-                      type="button"
-                      className={`segmented-control-button${accuracyPresentationMode === 'percentage-arrows' ? ' is-active' : ''}`}
-                      aria-pressed={accuracyPresentationMode === 'percentage-arrows'}
-                      onClick={() => setAccuracyPresentationMode('percentage-arrows')}
-                    >
-                      {t('accuracyModes.percentageArrows')}
-                    </button>
-                    <button
-                      type="button"
-                      className={`segmented-control-button${accuracyPresentationMode === 'historical-forecast' ? ' is-active' : ''}${historicalForecastState === 'unavailable' ? ' is-unavailable' : ''}`}
-                      aria-pressed={accuracyPresentationMode === 'historical-forecast'}
-                      aria-disabled={historicalForecastState === 'unavailable'}
-                      onClick={() => setAccuracyPresentationMode('historical-forecast')}
-                    >
-                      {t('accuracyModes.historicalForecast')}
-                    </button>
-                  </div>
-                </div>
-
-                {accuracyPresentationMode === 'historical-forecast' && historicalForecastAvailableHorizons.length > 0 ? (
-                  <div className="control-block control-segmented-block control-segmented-block-tight">
-                    <div className="control-label-inline">
-                      <span>{t('forecastHorizon')}</span>
-                      <div
-                        ref={horizonInfoRef}
-                        className={`inline-info${isHorizonInfoOpen ? ' is-open' : ''}`}
-                        onMouseEnter={() => setIsHorizonInfoOpen(true)}
-                        onMouseLeave={() => setIsHorizonInfoOpen(false)}
-                        onBlurCapture={(event) => {
-                          const nextTarget = event.relatedTarget as Node | null
-
-                          if (!event.currentTarget.contains(nextTarget)) {
-                            setIsHorizonInfoOpen(false)
-                          }
-                        }}
-                      >
-                        <button
-                          type="button"
-                          className="inline-info-button"
-                          aria-label={t('forecastHorizonInfoButton')}
-                          aria-expanded={isHorizonInfoOpen}
-                          aria-controls={horizonInfoId}
-                          onClick={() => setIsHorizonInfoOpen((current) => !current)}
-                          onFocus={() => setIsHorizonInfoOpen(true)}
-                        >
-                          ⓘ
-                        </button>
-                        <div id={horizonInfoId} role="tooltip" className="inline-info-popover">
-                          <strong>{t('forecastHorizonInfoTitle')}</strong>
-                          <p>{t('forecastHorizonInfoBody')}</p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="segmented-control segmented-control-horizon" role="tablist" aria-label={t('forecastHorizon')}>
-                      {historicalForecastAvailableHorizons.map((horizon) => (
-                        <button
-                          key={horizon}
-                          type="button"
-                          className={`segmented-control-button${historicalForecastHorizon === horizon ? ' is-active' : ''}`}
-                          aria-pressed={historicalForecastHorizon === horizon}
-                          onClick={() => setHistoricalForecastHorizon(horizon)}
-                        >
-                          {horizon}M
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
+            {showForecastAccuracy ? (
+            <div className="control-block control-mode-group control-horizon-group">
+              <div className="control-label-with-help">
+                <span>{t('forecastHorizon')}</span>
+                <button
+                  type="button"
+                  className="control-info-button"
+                  aria-label={t('forecastAccuracyInfoLabel')}
+                  title={t('forecastAccuracyInfoLabel')}
+                >
+                  i
+                  <span className="control-info-tooltip" role="tooltip">
+                    <span>{t('forecastAccuracyInfoLine1')}</span>
+                    <span>{t('forecastAccuracyInfoLine2')}</span>
+                  </span>
+                </button>
               </div>
-
-              {accuracyPresentationMode === 'historical-forecast' && historicalForecastState === 'error' ? (
-                <div className="callout callout-error" role="status" aria-live="polite">
-                  <div>{historicalForecastMessage}</div>
-                  <div className="callout-actions">
-                    <button type="button" className="callout-button" onClick={retryHistoricalForecast}>{t('retry')}</button>
-                  </div>
-                </div>
-              ) : null}
-
-              {accuracyPresentationMode === 'historical-forecast' && historicalForecastState === 'unavailable' ? (
-                <div className="callout" role="status" aria-live="polite">
-                  <div>{historicalForecastMessage}</div>
-                </div>
-              ) : null}
+              <div className="chart-range-buttons control-mode-buttons" role="group" aria-label={t('forecastHorizon')}>
+                {FORECAST_ACCURACY_HORIZONS.map((horizon) => (
+                  <button
+                    key={horizon}
+                    type="button"
+                    className={`chart-range-button${forecastAccuracyHorizon === horizon ? ' is-active' : ''}`}
+                    aria-pressed={forecastAccuracyHorizon === horizon}
+                    onClick={() => setForecastAccuracyHorizon(horizon)}
+                  >
+                    {`${horizon}M`}
+                  </button>
+                ))}
+              </div>
             </div>
-          ) : null}
+            ) : null}
+          </div>
         </div>
 
         {benchmarkRequired ? <p className="callout">{t('benchmarkRequired')}</p> : null}
@@ -3139,20 +2378,14 @@ export function RawDataView() {
 
       <ChartPanel
         locale={locale}
-        payload={viewerPayload}
+        payload={activePayload}
         emptyMessage={benchmarkRequired ? t('chartNeedsBenchmark') : t('chartEmpty')}
-        isLoading={componentsState === 'loading' || seriesState === 'loading'}
+        isLoading={componentsState === 'loading' || seriesState === 'loading' || forecastAccuracyState === 'loading'}
         loadingTitle={t('loadingTitle')}
         loadingHint={t('loadingHint')}
         resetZoomLabel={t('resetZoom')}
         sourceLabel={t('sourceLabel')}
-        accuracyPresentationMode={accuracyPresentationMode}
-        forecastAccuracyLabel={t('forecastAccuracy')}
-        historicalForecastLabel={t('accuracyModes.historicalForecast')}
-        historicalForecastResponse={historicalForecastResponse}
-        historicalForecastState={historicalForecastState}
-        historicalForecastMessage={historicalForecastMessage}
-        pinnedTooltipLabel={t('pinnedTooltipLabel')}
+        showForecastAccuracy={showForecastAccuracy}
       />
     </div>
   )

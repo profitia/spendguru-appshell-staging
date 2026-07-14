@@ -2,6 +2,7 @@ export type TimeSeriesViewerLocale = 'pl' | 'en'
 
 export type TimeSeriesViewerSeriesKind =
   | 'historical'
+  | 'historical-forecast'
   | 'forecast-central'
   | 'forecast-upper'
   | 'forecast-lower'

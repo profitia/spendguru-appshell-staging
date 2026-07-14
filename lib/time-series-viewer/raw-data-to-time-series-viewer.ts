@@ -49,16 +49,6 @@ function formatNumber(locale: TimeSeriesViewerLocale, value: number | null) {
   }).format(value)
 }
 
-function formatDiff(locale: TimeSeriesViewerLocale, value: number | null) {
-  if (value === null) {
-    return ' - '
-  }
-
-  return `${new Intl.NumberFormat(locale === 'pl' ? 'pl-PL' : 'en-US', {
-    maximumFractionDigits: 3,
-  }).format(value)}%`
-}
-
 function uniqueDates(values: string[]) {
   return Array.from(new Set(values)).sort((left, right) => new Date(left).getTime() - new Date(right).getTime())
 }
@@ -124,13 +114,6 @@ function buildTooltipRows(
   if (pointType !== 'historical') {
     rows.push({ label: locale === 'pl' ? 'Lower' : 'Lower', value: formatNumber(locale, detail.forecastLower) })
     rows.push({ label: locale === 'pl' ? 'Upper' : 'Upper', value: formatNumber(locale, detail.forecastUpper) })
-  }
-
-  if (detail.forecastAccuracyDiff !== null) {
-    rows.push({
-      label: locale === 'pl' ? 'Trafnosc prognozy' : 'Forecast accuracy',
-      value: formatDiff(locale, detail.forecastAccuracyDiff),
-    })
   }
 
   rows.push({ label: locale === 'pl' ? 'Benchmark' : 'Benchmark', value: detail.benchmarkCode ?? ' - ' })

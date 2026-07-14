@@ -1,45 +1,34 @@
-import assert from 'node:assert/strict'
 import test from 'node:test'
+import assert from 'node:assert/strict'
 
-import {
-  resolvePaddedValueDomain,
-  shouldCommitZoomSelection,
-  shouldTogglePinnedSurface,
-} from '@/lib/chart/chart-panel-helpers'
+import { resolveNiceScaleDomain } from '../lib/chart/chart-panel-helpers'
 
-test('resolvePaddedValueDomain adds lower and upper breathing room for ranged values', () => {
-  const domain = resolvePaddedValueDomain([100, 125, 160])
+test('resolveNiceScaleDomain returns human-friendly rounded ticks', () => {
+  const domain = resolveNiceScaleDomain([2492.37, 2511.64, 2530.91])
 
-  assert.equal(domain.minimum, 92.8)
-  assert.equal(domain.maximum, 167.2)
+  assert.ok(domain.minimum <= 2490)
+  assert.ok(domain.maximum >= 2540)
+  assert.equal(domain.step, 10)
+  assert.ok(domain.ticks.every((tick) => Number.isInteger(tick.value / 10)))
+  assert.ok(domain.ticks.length >= 5)
+  assert.ok(domain.ticks.length <= 8)
 })
 
-test('resolvePaddedValueDomain keeps a minimum padding for flat low-value series', () => {
-  const domain = resolvePaddedValueDomain([0.2, 0.2, 0.2])
+test('resolveNiceScaleDomain keeps small fluctuations visible without exaggerating them', () => {
+  const domain = resolveNiceScaleDomain([98.4, 98.8, 99.2, 99.6])
 
-  assert.equal(domain.minimum, -0.8)
-  assert.equal(domain.maximum, 1.2)
+  assert.ok(domain.minimum <= 98.5)
+  assert.ok(domain.maximum >= 99.5)
+  assert.equal(domain.step, 0.5)
+  assert.ok(domain.ticks.length >= 5)
+  assert.ok(domain.ticks.length <= 8)
 })
 
-test('resolvePaddedValueDomain returns fallback bounds for empty values', () => {
-  const domain = resolvePaddedValueDomain([])
+test('resolveNiceScaleDomain creates a stable domain for flat series', () => {
+  const domain = resolveNiceScaleDomain([8452, 8452, 8452])
 
-  assert.deepEqual(domain, { minimum: 0, maximum: 1 })
-})
-
-test('shouldCommitZoomSelection rejects pointer movement below threshold', () => {
-  assert.equal(shouldCommitZoomSelection(120, 131, 12), false)
-})
-
-test('shouldCommitZoomSelection accepts pointer movement at threshold', () => {
-  assert.equal(shouldCommitZoomSelection(120, 132, 12), true)
-})
-
-test('shouldTogglePinnedSurface returns true for the same key and variant', () => {
-  assert.equal(shouldTogglePinnedSurface('point-1', 'historical', 'point-1', 'historical'), true)
-})
-
-test('shouldTogglePinnedSurface returns false when either key or variant changes', () => {
-  assert.equal(shouldTogglePinnedSurface('point-1', 'historical', 'point-2', 'historical'), false)
-  assert.equal(shouldTogglePinnedSurface('point-1', 'historical', 'point-1', 'historical-forecast'), false)
+  assert.ok(domain.minimum < 8452)
+  assert.ok(domain.maximum > 8452)
+  assert.ok(domain.ticks.length >= 5)
+  assert.ok(domain.ticks.length <= 8)
 })
