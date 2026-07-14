@@ -18,6 +18,8 @@ function formatScenarioLabel(locale: TimeSeriesViewerLocale, pointType: TimeSeri
   switch (pointType) {
     case 'historical':
       return locale === 'pl' ? 'Ceny historyczne' : 'Historical Prices'
+    case 'historical-forecast':
+      return locale === 'pl' ? 'Historyczna prognoza' : 'Historical forecast'
     case 'forecast-central':
       return locale === 'pl' ? 'Prognoza' : 'Forecast'
     case 'forecast-upper':
