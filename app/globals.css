@@ -161,6 +161,11 @@ input:focus-visible {
   min-width: 0;
 }
 
+.control-block.control-horizon-group.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .control-block.control-horizon-group .control-label-with-help {
   min-height: 40px;
   flex: 0 0 auto;
@@ -1541,6 +1546,15 @@ input:focus-visible {
     max-width: none;
     max-height: none;
     border-radius: 0;
+  }
+
+  .chart-tooltip-mobile-wrap {
+    margin-top: 0.625rem;
+    min-height: 0;
+  }
+
+  .chart-tooltip-mobile-wrap.is-reserved {
+    min-height: 0;
   }
 
   .chart-header {

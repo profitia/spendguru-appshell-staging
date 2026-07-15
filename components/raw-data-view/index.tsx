@@ -2252,6 +2252,7 @@ export function RawDataView() {
   }, [forecastAccuracyResponse, locale])
 
   const activePayload = mergeAccuracyIntoViewerPayload(viewerPayload, forecastAccuracyPayload, showForecastAccuracy)
+  const isChartLoading = componentsState === 'loading' || seriesState === 'loading' || (forecastAccuracyState === 'loading' && !activePayload)
 
   return (
     <div className="shell-grid">
@@ -2330,8 +2331,10 @@ export function RawDataView() {
               <span>{t('showForecastAccuracy')}</span>
             </label>
 
-            {showForecastAccuracy ? (
-            <div className="control-block control-mode-group control-horizon-group">
+            <div
+              className={`control-block control-mode-group control-horizon-group${showForecastAccuracy ? '' : ' is-hidden'}`}
+              aria-hidden={!showForecastAccuracy}
+            >
               <div className="control-label-with-help">
                 <span>{t('forecastHorizon')}</span>
                 <button
@@ -2339,6 +2342,7 @@ export function RawDataView() {
                   className="control-info-button"
                   aria-label={t('forecastAccuracyInfoLabel')}
                   title={t('forecastAccuracyInfoLabel')}
+                  tabIndex={showForecastAccuracy ? 0 : -1}
                 >
                   i
                   <span className="control-info-tooltip" role="tooltip">
@@ -2354,6 +2358,8 @@ export function RawDataView() {
                     type="button"
                     className={`chart-range-button${forecastAccuracyHorizon === horizon ? ' is-active' : ''}`}
                     aria-pressed={forecastAccuracyHorizon === horizon}
+                    disabled={!showForecastAccuracy}
+                    tabIndex={showForecastAccuracy ? 0 : -1}
                     onClick={() => setForecastAccuracyHorizon(horizon)}
                   >
                     {`${horizon}M`}
@@ -2361,7 +2367,6 @@ export function RawDataView() {
                 ))}
               </div>
             </div>
-            ) : null}
           </div>
         </div>
 
@@ -2380,7 +2385,7 @@ export function RawDataView() {
         locale={locale}
         payload={activePayload}
         emptyMessage={benchmarkRequired ? t('chartNeedsBenchmark') : t('chartEmpty')}
-        isLoading={componentsState === 'loading' || seriesState === 'loading' || forecastAccuracyState === 'loading'}
+        isLoading={isChartLoading}
         loadingTitle={t('loadingTitle')}
         loadingHint={t('loadingHint')}
         resetZoomLabel={t('resetZoom')}
