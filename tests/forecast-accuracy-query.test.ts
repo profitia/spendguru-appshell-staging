@@ -3,20 +3,21 @@ import assert from 'node:assert/strict'
 
 import { buildForecastAccuracyCacheKey } from '@/lib/forecast-accuracy/forecast-accuracy-cache'
 import { ForecastAccuracyRequestError } from '@/lib/forecast-accuracy/forecast-accuracy-contract'
+import type { ForecastAccuracyRecordSource } from '@/lib/forecast-accuracy/forecast-accuracy-mapper'
 import { createForecastAccuracyQueryService } from '@/lib/forecast-accuracy/forecast-accuracy-query'
 
 function paramsFrom(entries: Record<string, string>) {
   return new URLSearchParams(entries)
 }
 
-function createRecord(overrides: Partial<ReturnType<typeof baseRecord>> = {}) {
+function createRecord(overrides: Partial<ForecastAccuracyRecordSource> = {}) {
   return {
     ...baseRecord(),
     ...overrides,
   }
 }
 
-function baseRecord() {
+function baseRecord(): ForecastAccuracyRecordSource {
   return {
     id: 'acc-1',
     organizationId: 'org-1',
