@@ -8,6 +8,7 @@
     "build": "prisma generate --schema prisma/schema.prisma && next build",
     "start": "next start --hostname 0.0.0.0 --port ${PORT:-3002}",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
     "test:mapper": "tsx --test tests/dashboard-record-mapper.test.ts"
   },
   "dependencies": {
