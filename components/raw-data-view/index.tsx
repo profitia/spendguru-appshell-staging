@@ -1878,7 +1878,7 @@ function ChartPanel({
   )
 }
 
-export function RawDataView() {
+export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?: boolean }) {
   const locale = useLocale() as Locale
   const t = useTranslations('RawDataView')
   const pathname = usePathname()
@@ -2257,11 +2257,13 @@ export function RawDataView() {
   return (
     <div className="shell-grid">
       <section className="panel filter-panel" style={{ gridColumn: 'span 12' }}>
-        <div className="filters-topbar">
-          <div>
-            <strong>{t('workspaceTitle')}</strong>
-            <p className="muted filters-subtitle">{t('workspaceSubtitle')}</p>
-          </div>
+        <div className={`filters-topbar${showWorkspaceIntro ? '' : ' is-compact'}`}>
+          {showWorkspaceIntro ? (
+            <div>
+              <strong>{t('workspaceTitle')}</strong>
+              <p className="muted filters-subtitle">{t('workspaceSubtitle')}</p>
+            </div>
+          ) : null}
 
           <div className="language-switch" role="group" aria-label={t('language')}>
             <button

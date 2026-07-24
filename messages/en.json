@@ -3,6 +3,37 @@
     "title": "Time Series Intelligence Viewer",
     "description": "Interactive time series intelligence workspace"
   },
+  "AppShell": {
+    "brand": "SpendGuru",
+    "soon": "Soon",
+    "mobileNavigation": "Module navigation",
+    "dashboard": {
+      "title": "Dashboard",
+      "shortLabel": "Dashboard",
+      "tooltip": "Dashboard - active module",
+      "description": "Market data, history and forecasts in one focused workspace view."
+    },
+    "categories": {
+      "title": "Categories",
+      "shortLabel": "Categories",
+      "tooltip": "Categories - planned module"
+    },
+    "suppliers": {
+      "title": "Suppliers",
+      "shortLabel": "Suppliers",
+      "tooltip": "Suppliers - planned module"
+    },
+    "offers": {
+      "title": "Offers",
+      "shortLabel": "Offers",
+      "tooltip": "Offers - planned module"
+    },
+    "assistant": {
+      "title": "AI Assistant",
+      "shortLabel": "AI",
+      "tooltip": "AI Assistant - planned module"
+    }
+  },
   "Home": {
     "title": "Time Series Intelligence Viewer",
     "subtitle": "Interactive analysis surface for market history, forecast quality and benchmark context.",

@@ -3,6 +3,37 @@
     "title": "Time Series Intelligence Viewer",
     "description": "Interaktywny obszar analizy szeregów czasowych"
   },
+  "AppShell": {
+    "brand": "SpendGuru",
+    "soon": "Wkrótce",
+    "mobileNavigation": "Nawigacja modułów",
+    "dashboard": {
+      "title": "Dashboard",
+      "shortLabel": "Dashboard",
+      "tooltip": "Dashboard - aktywny moduł",
+      "description": "Dane rynkowe, historia i prognozy w jednym widoku roboczym."
+    },
+    "categories": {
+      "title": "Kategorie",
+      "shortLabel": "Kategorie",
+      "tooltip": "Kategorie - moduł planowany"
+    },
+    "suppliers": {
+      "title": "Dostawcy",
+      "shortLabel": "Dostawcy",
+      "tooltip": "Dostawcy - moduł planowany"
+    },
+    "offers": {
+      "title": "Oferty",
+      "shortLabel": "Oferty",
+      "tooltip": "Oferty - moduł planowany"
+    },
+    "assistant": {
+      "title": "Asystent AI",
+      "shortLabel": "AI",
+      "tooltip": "Asystent AI - moduł planowany"
+    }
+  },
   "Home": {
     "title": "Time Series Intelligence Viewer",
     "subtitle": "Interaktywna powierzchnia do analizy rynku, jakości prognoz i kontekstu benchmarku.",
