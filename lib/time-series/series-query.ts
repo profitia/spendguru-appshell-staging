@@ -15,6 +15,164 @@ import type { DashboardRecordListFilters } from '@/lib/raw-data/dashboard-record
 
 import type { ComponentListResponse, RecordsResponse, SeriesProfilingMetrics, SeriesResponse } from './series-contract'
 
+type BenchmarkAnalyticsRange = '1M' | '3M' | '6M' | '1Y' | '3Y' | '5Y' | 'ALL'
+
+type BenchmarkAnalyticsSeriesResponse = {
+  providerSeries: {
+    providerSeriesId: string
+  }
+  displayName: string
+  latestValue: number | null
+  frequency: string | null
+  currency: string | null
+  unit: string | null
+  source: string | null
+  range: BenchmarkAnalyticsRange
+  historical: Array<{
+    date: string
+    value: number | null
+  }>
+}
+
+const LOCAL_SG_RUNTIME_BASE_URL = 'http://localhost:3001'
+const PRODUCTION_SG_RUNTIME_BASE_URL = 'https://benchmark-finder-category-builder.onrender.com'
+
+function resolveSgRuntimeBaseUrl() {
+  if (process.env.SG_RUNTIME_BASE_URL?.trim()) {
+    return process.env.SG_RUNTIME_BASE_URL.trim()
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    return PRODUCTION_SG_RUNTIME_BASE_URL
+  }
+
+  return LOCAL_SG_RUNTIME_BASE_URL
+}
+
+function readBenchmarkAnalyticsRange(params: URLSearchParams): BenchmarkAnalyticsRange {
+  const value = params.get('range')?.trim().toUpperCase()
+
+  switch (value) {
+    case '1M':
+    case '3M':
+    case '6M':
+    case '1Y':
+    case '3Y':
+    case '5Y':
+    case 'ALL':
+      return value
+    default:
+      return '1Y'
+  }
+}
+
+function toBenchmarkSeriesResponse(
+  payload: BenchmarkAnalyticsSeriesResponse,
+  locale: 'pl' | 'en',
+  displayNameOverride: string | null,
+): SeriesResponse {
+  const effectiveName = displayNameOverride?.trim() || payload.displayName
+  const latestHistoricalPoint = payload.historical[payload.historical.length - 1] ?? null
+  const detailDate = latestHistoricalPoint?.date ?? null
+  const detailValue = latestHistoricalPoint?.value ?? payload.latestValue
+
+  return {
+    selection: {
+      componentName: effectiveName,
+      componentId: null,
+      componentCode: payload.providerSeries.providerSeriesId,
+      sourceLabel: payload.source,
+    },
+    benchmarkSelectionRequired: false,
+    availableBenchmarks: [
+      {
+        componentCode: payload.providerSeries.providerSeriesId,
+        sourceLabel: payload.source,
+        descriptionPlAvailable: locale === 'pl',
+        descriptionEnAvailable: locale === 'en',
+      },
+    ],
+    sourceInfo: {
+      benchmarkCode: payload.providerSeries.providerSeriesId,
+      sourceLabel: payload.source,
+      descriptionPl: locale === 'pl' ? effectiveName : null,
+      descriptionEn: locale === 'en' ? effectiveName : null,
+      unit: payload.unit,
+      currency: payload.currency,
+      market: null,
+      country: null,
+      qualityStatus: null,
+      lastSyncedAt: null,
+    },
+    detailSummary: {
+      componentName: effectiveName,
+      componentCode: payload.providerSeries.providerSeriesId,
+      sourceDate: detailDate,
+      scenarioType: 'historical',
+      metricValue: detailValue,
+      forecastLower: null,
+      forecastUpper: null,
+      forecastAccuracyDiff: null,
+      unit: payload.unit,
+      currency: payload.currency,
+      market: null,
+      country: null,
+      qualityStatus: null,
+      descriptionPl: locale === 'pl' ? effectiveName : null,
+      descriptionEn: locale === 'en' ? effectiveName : null,
+      sourceLabel: payload.source,
+      lastSyncedAt: null,
+    },
+    forecastAnchor: latestHistoricalPoint
+      ? {
+          date: latestHistoricalPoint.date,
+          value: latestHistoricalPoint.value,
+        }
+      : null,
+    historicalWindow: {
+      from: payload.historical[0]?.date ?? null,
+      to: latestHistoricalPoint?.date ?? null,
+    },
+    historical: payload.historical.map((point, index) => ({
+      date: point.date,
+      value: point.value,
+      diff: null,
+      recordId: `${payload.providerSeries.providerSeriesId}-${index}`,
+      dedupeKey: `${payload.providerSeries.providerSeriesId}-${point.date}`,
+    })),
+    forecast: null,
+  }
+}
+
+async function getBenchmarkSeries(
+  params: URLSearchParams,
+  locale: 'pl' | 'en',
+): Promise<SeriesResponse> {
+  const seriesId = params.get('seriesId')?.trim()
+
+  if (!seriesId) {
+    throw new Error('seriesId is required for benchmark analytics mode.')
+  }
+
+  const url = new URL('/api/benchmark/analytics-series', resolveSgRuntimeBaseUrl())
+  url.searchParams.set('seriesId', seriesId)
+  url.searchParams.set('range', readBenchmarkAnalyticsRange(params))
+
+  const response = await fetch(url, {
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+    },
+  })
+
+  const payload = await response.json() as BenchmarkAnalyticsSeriesResponse | { error?: string }
+  if (!response.ok) {
+    throw new Error('error' in payload ? payload.error ?? 'Failed to load benchmark analytics series.' : 'Failed to load benchmark analytics series.')
+  }
+
+  return toBenchmarkSeriesResponse(payload as BenchmarkAnalyticsSeriesResponse, locale, params.get('displayName'))
+}
+
 type ServerSeriesCacheEntry = {
   key: string
   cachedAt: number
@@ -154,6 +312,10 @@ export async function getComponentList(params: URLSearchParams, locale: 'pl' | '
 }
 
 export async function getSeries(params: URLSearchParams, locale: 'pl' | 'en'): Promise<SeriesResponse> {
+  if (params.get('seriesId')?.trim()) {
+    return getBenchmarkSeries(params, locale)
+  }
+
   const profileMode = readProfileMode(params)
   const totalStartedAt = performance.now()
   const filters: SeriesFilters = {

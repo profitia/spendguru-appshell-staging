@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { useLocale, useTranslations } from 'next-intl'
-import { usePathname } from 'next/navigation'
+import { usePathname, useSearchParams } from 'next/navigation'
 
 import { resolveNiceScaleDomain } from '@/lib/chart/chart-panel-helpers'
 
@@ -100,6 +100,11 @@ type RawDataViewProfiler = {
 type SearchableSelectOption = {
   value: string
   label: string
+}
+
+type BenchmarkSubject = {
+  seriesId: string
+  displayName: string | null
 }
 
 function mergeAccuracyIntoViewerPayload(
@@ -328,6 +333,39 @@ function replaceLocaleInPath(pathname: string, nextLocale: Locale) {
 
 function buildClientSeriesCacheKey(locale: Locale, componentName: string, componentCode: string, showForecast: boolean) {
   return JSON.stringify({ locale, componentName, componentCode: componentCode || null, showForecast })
+}
+
+function buildBenchmarkSeriesCacheKey(locale: Locale, seriesId: string, range: RangePreset) {
+  return JSON.stringify({ locale, seriesId, range, mode: 'benchmark' })
+}
+
+function readBenchmarkSubject(searchParams: ReturnType<typeof useSearchParams>): BenchmarkSubject | null {
+  const seriesId = searchParams.get('seriesId')?.trim() ?? ''
+  if (!seriesId) {
+    return null
+  }
+
+  const displayName = searchParams.get('displayName')?.trim() ?? null
+  return {
+    seriesId,
+    displayName: displayName && displayName.length > 0 ? displayName : null,
+  }
+}
+
+function readInitialRange(searchParams: ReturnType<typeof useSearchParams>): RangePreset {
+  const value = searchParams.get('range')?.trim().toUpperCase()
+
+  switch (value) {
+    case '3M':
+    case '6M':
+    case '1Y':
+    case '3Y':
+    case '5Y':
+    case 'ALL':
+      return value
+    default:
+      return '1Y'
+  }
 }
 
 function getRawDataViewProfiler() {
@@ -991,6 +1029,9 @@ function ChartPanel({
   resetZoomLabel,
   sourceLabel,
   showForecastAccuracy,
+  initialPreset = 'ALL',
+  lockServerRange = false,
+  onPresetChange,
 }: {
   locale: Locale
   payload: TimeSeriesViewerPayload | null
@@ -1001,10 +1042,13 @@ function ChartPanel({
   resetZoomLabel: string
   sourceLabel: string
   showForecastAccuracy: boolean
+  initialPreset?: RangePreset
+  lockServerRange?: boolean
+  onPresetChange?: (preset: RangePreset) => void
 }) {
   const [activeDate, setActiveDate] = useState<string | null>(null)
   const [activeTooltip, setActiveTooltip] = useState<AccuracyMarker | null>(null)
-  const [activePreset, setActivePreset] = useState<RangePreset>('ALL')
+  const [activePreset, setActivePreset] = useState<RangePreset>(initialPreset)
   const [selectedSurfaceKey, setSelectedSurfaceKey] = useState<string | null>(null)
   const [selectedDate, setSelectedDate] = useState<string | null>(null)
   const [selectedSurface, setSelectedSurface] = useState<AccuracyMarker | null>(null)
@@ -1026,7 +1070,7 @@ function ChartPanel({
   const pinnedSurfaceKey = selectedSurface?.key ?? selectedSurfaceKey ?? selectedDate
 
   useEffect(() => {
-    setActivePreset('ALL')
+    setActivePreset(initialPreset)
     setZoomRange(null)
     setSelectedSurfaceKey(null)
     setSelectedDate(null)
@@ -1037,7 +1081,7 @@ function ChartPanel({
     setArmedAccuracyKey(null)
     setHiddenItems([])
     setTooltipPosition(null)
-  }, [payload?.benchmarkCode, payload?.title])
+  }, [initialPreset, payload?.benchmarkCode, payload?.title])
 
   useEffect(() => {
     return () => {
@@ -1409,7 +1453,10 @@ function ChartPanel({
 
   function handleRangePreset(preset: RangePreset) {
     setActivePreset(preset)
-    setZoomRange(null)
+    onPresetChange?.(preset)
+    if (!lockServerRange) {
+      setZoomRange(null)
+    }
   }
 
   function scheduleChartSurfaceDismissal() {
@@ -1526,7 +1573,7 @@ function ChartPanel({
               </button>
             ))}
           </div>
-          {zoomRange ? (
+          {zoomRange && !lockServerRange ? (
             <button type="button" className="chart-reset-button" onClick={() => setZoomRange(null)}>{resetZoomLabel}</button>
           ) : null}
         </div>
@@ -1878,10 +1925,14 @@ function ChartPanel({
   )
 }
 
-export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?: boolean }) {
+export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
   const locale = useLocale() as Locale
   const t = useTranslations('RawDataView')
   const pathname = usePathname()
+  const searchParams = useSearchParams()
+  const benchmarkSubject = readBenchmarkSubject(searchParams)
+  const isBenchmarkMode = benchmarkSubject !== null
+  const initialRange = readInitialRange(searchParams)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [componentsState, setComponentsState] = useState<LoadState>('idle')
   const [seriesState, setSeriesState] = useState<LoadState>('idle')
@@ -1900,6 +1951,7 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
   const [forecastAccuracyPayload, setForecastAccuracyPayload] = useState<TimeSeriesViewerPayload | null>(null)
   const [series, setSeries] = useState<SeriesResponse | null>(null)
   const [viewerPayload, setViewerPayload] = useState<TimeSeriesViewerPayload | null>(null)
+  const [benchmarkRange, setBenchmarkRange] = useState<RangePreset>(initialRange)
   const seriesAbortRef = useRef<AbortController | null>(null)
   const forecastAccuracyAbortRef = useRef<AbortController | null>(null)
   const seriesCacheRef = useRef<Map<string, CachedSeriesEntry>>(new Map())
@@ -1917,6 +1969,10 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
     value: benchmark.componentCode ?? '',
     label: benchmark.componentCode ?? t('benchmarkMissing'),
   }))
+
+  useEffect(() => {
+    setBenchmarkRange(initialRange)
+  }, [initialRange, benchmarkSubject?.seriesId])
 
   function retryLoad() {
     setErrorMessage(null)
@@ -1945,6 +2001,11 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
   }
 
   useEffect(() => {
+    if (isBenchmarkMode) {
+      setComponentsState('ready')
+      return
+    }
+
     let cancelled = false
 
     async function loadComponents() {
@@ -1982,9 +2043,13 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
     return () => {
       cancelled = true
     }
-  }, [locale, t, reloadNonce])
+  }, [isBenchmarkMode, locale, t, reloadNonce])
 
   useEffect(() => {
+    if (isBenchmarkMode) {
+      return
+    }
+
     if (!selectedComponent) {
       return
     }
@@ -2000,9 +2065,157 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
     setViewerPayload(null)
     setForecastAccuracyResponse(null)
     setForecastAccuracyPayload(null)
-  }, [selectedComponentName])
+  }, [isBenchmarkMode, selectedComponentName])
 
   useEffect(() => {
+    if (isBenchmarkMode) {
+      const activeBenchmarkSubject = benchmarkSubject
+      if (!activeBenchmarkSubject) {
+        return
+      }
+
+      let cancelled = false
+      seriesAbortRef.current?.abort()
+      const controller = new AbortController()
+      seriesAbortRef.current = controller
+      const interactionStartedAt = performance.now()
+      let timedOut = false
+
+      async function waitForNextPaint() {
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => resolve())
+        })
+      }
+
+      async function loadBenchmarkSeries() {
+        const cacheKey = buildBenchmarkSeriesCacheKey(locale, activeBenchmarkSubject.seriesId, benchmarkRange)
+        const cached = seriesCacheRef.current.get(cacheKey)
+
+        if (cached && Date.now() - cached.cachedAt <= CLIENT_SERIES_CACHE_TTL_MS) {
+          setErrorMessage(null)
+          setSeries(cached.response)
+          setViewerPayload(cached.payload)
+          setSeriesState('ready')
+          const committedAt = performance.now()
+          await waitForNextPaint()
+
+          if (!cancelled) {
+            const renderedAt = performance.now()
+            recordRawDataViewProfile({
+              componentName: activeBenchmarkSubject.displayName ?? activeBenchmarkSubject.seriesId,
+              componentCode: activeBenchmarkSubject.seriesId,
+              showForecast: false,
+              source: 'client-cache',
+              requestDispatchMs: 0,
+              networkMs: 0,
+              responseParseMs: 0,
+              adapterMs: 0,
+              commitMs: committedAt - interactionStartedAt,
+              firstPaintMs: renderedAt - committedAt,
+              totalInteractionMs: renderedAt - interactionStartedAt,
+              serverTotalMs: cached.response.profiling?.totalServerMs ?? null,
+            })
+          }
+
+          return
+        }
+
+        setSeriesState('loading')
+        setErrorMessage(null)
+        setSeries(null)
+        setViewerPayload(null)
+
+        const timeoutHandle = window.setTimeout(() => {
+          timedOut = true
+          controller.abort()
+        }, 8000)
+
+        try {
+          const params = new URLSearchParams({
+            locale,
+            seriesId: activeBenchmarkSubject.seriesId,
+            range: benchmarkRange,
+          })
+          if (activeBenchmarkSubject.displayName) {
+            params.set('displayName', activeBenchmarkSubject.displayName)
+          }
+
+          const requestStartedAt = performance.now()
+          const seriesResponse = await fetch(`/api/series?${params.toString()}`, { cache: 'no-store', signal: controller.signal })
+          const responseReceivedAt = performance.now()
+          const seriesPayload = await seriesResponse.json() as SeriesResponse | { error?: string }
+          const responseParsedAt = performance.now()
+
+          if (!seriesResponse.ok) {
+            throw new Error('error' in seriesPayload ? seriesPayload.error ?? t('errors.series') : t('errors.series'))
+          }
+
+          const nextSeries = seriesPayload as SeriesResponse
+          const adapterStartedAt = performance.now()
+          const nextViewerPayload = toTimeSeriesViewerPayload(nextSeries, locale)
+          const adapterFinishedAt = performance.now()
+
+          if (cancelled) {
+            return
+          }
+
+          seriesCacheRef.current.set(cacheKey, {
+            response: nextSeries,
+            payload: nextViewerPayload,
+            cachedAt: Date.now(),
+          })
+          setSeries(nextSeries)
+          setViewerPayload(nextViewerPayload)
+          setSeriesState('ready')
+          const committedAt = performance.now()
+          await waitForNextPaint()
+
+          if (!cancelled) {
+            const renderedAt = performance.now()
+            recordRawDataViewProfile({
+              componentName: activeBenchmarkSubject.displayName ?? activeBenchmarkSubject.seriesId,
+              componentCode: activeBenchmarkSubject.seriesId,
+              showForecast: false,
+              source: 'network',
+              requestDispatchMs: requestStartedAt - interactionStartedAt,
+              networkMs: responseReceivedAt - requestStartedAt,
+              responseParseMs: responseParsedAt - responseReceivedAt,
+              adapterMs: adapterFinishedAt - adapterStartedAt,
+              commitMs: committedAt - adapterFinishedAt,
+              firstPaintMs: renderedAt - committedAt,
+              totalInteractionMs: renderedAt - interactionStartedAt,
+              serverTotalMs: nextSeries.profiling?.totalServerMs ?? null,
+            })
+          }
+        } catch (error) {
+          if ((error as Error).name === 'AbortError') {
+            if (timedOut && !cancelled) {
+              setSeriesState('error')
+              setErrorMessage(t('errors.timeout'))
+            }
+
+            return
+          }
+
+          if (cancelled) {
+            return
+          }
+
+          setSeriesState('error')
+          setErrorMessage(toUiLoadErrorMessage(error, t('errors.series'), t('errors.timeout')))
+        } finally {
+          window.clearTimeout(timeoutHandle)
+        }
+      }
+
+      void loadBenchmarkSeries()
+
+      return () => {
+        cancelled = true
+        controller.abort()
+      }
+    }
+
     if (!selectedComponentName) {
       return
     }
@@ -2179,9 +2392,17 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
       cancelled = true
       controller.abort()
     }
-  }, [benchmarkRequired, effectiveComponentCode, locale, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t, reloadNonce])
+  }, [benchmarkRange, benchmarkRequired, effectiveComponentCode, isBenchmarkMode, locale, benchmarkSubject, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t, reloadNonce])
 
   useEffect(() => {
+    if (isBenchmarkMode) {
+      forecastAccuracyAbortRef.current?.abort()
+      setForecastAccuracyState('idle')
+      setForecastAccuracyResponse(null)
+      setForecastAccuracyPayload(null)
+      return
+    }
+
     if (!showForecastAccuracy || !selectedComponentName || benchmarkRequired || !effectiveComponentCode) {
       forecastAccuracyAbortRef.current?.abort()
       setForecastAccuracyState('idle')
@@ -2241,7 +2462,7 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
       cancelled = true
       controller.abort()
     }
-  }, [benchmarkRequired, effectiveComponentCode, forecastAccuracyHorizon, locale, selectedComponentName, showForecastAccuracy, t])
+  }, [benchmarkRequired, effectiveComponentCode, forecastAccuracyHorizon, isBenchmarkMode, locale, selectedComponentName, showForecastAccuracy, t])
 
   useEffect(() => {
     if (!forecastAccuracyResponse) {
@@ -2253,17 +2474,46 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
 
   const activePayload = mergeAccuracyIntoViewerPayload(viewerPayload, forecastAccuracyPayload, showForecastAccuracy)
   const isChartLoading = componentsState === 'loading' || seriesState === 'loading' || (forecastAccuracyState === 'loading' && !activePayload)
+  const selectedBenchmarkLabel = isBenchmarkMode
+    ? (benchmarkSubject?.displayName ?? benchmarkSubject?.seriesId ?? t('singleBenchmark'))
+    : benchmarkRequired
+    ? t('selectBenchmark')
+    : selectedComponent?.availableBenchmarks.find((benchmark) => benchmark.componentCode === effectiveComponentCode)?.sourceLabel
+      ?? selectedComponent?.availableBenchmarks[0]?.sourceLabel
+      ?? t('singleBenchmark')
+  const hasForecastSeries = activePayload?.series.some((entry) => entry.kind === 'forecast-central') ?? false
+  const hasHistoricalForecastSeries = activePayload?.series.some((entry) => entry.kind === 'historical-forecast') ?? false
+  const summaryStatusLabel = errorMessage
+    ? (locale === 'pl' ? 'Wymaga uwagi' : 'Needs attention')
+    : isChartLoading
+      ? (locale === 'pl' ? 'W przygotowaniu' : 'Preparing')
+      : (locale === 'pl' ? 'Gotowe do analizy' : 'Ready for analysis')
+  const summaryBody = errorMessage
+    ? errorMessage
+    : benchmarkRequired
+      ? t('chartNeedsBenchmark')
+      : isChartLoading
+        ? `${t('loadingTitle')} - ${t('loadingHint')}`
+        : hasForecastSeries && hasHistoricalForecastSeries
+          ? (locale === 'pl'
+            ? 'Widok łączy historię, prognozę i odczyt jakości prognozy dla wybranego benchmarku.'
+            : 'The view combines history, forecast and forecast-quality context for the selected benchmark.')
+          : hasForecastSeries
+            ? (locale === 'pl'
+              ? 'Widok zestawia historię z prognozą i zakresem niepewności dla wybranego benchmarku.'
+              : 'The view pairs historical performance with forecast and uncertainty range for the selected benchmark.')
+            : (locale === 'pl'
+              ? 'Widok koncentruje się na historii i kontekście benchmarku dla wybranego komponentu.'
+              : 'The view focuses on historical performance and benchmark context for the selected component.')
 
   return (
     <div className="shell-grid">
       <section className="panel filter-panel" style={{ gridColumn: 'span 12' }}>
-        <div className={`filters-topbar${showWorkspaceIntro ? '' : ' is-compact'}`}>
-          {showWorkspaceIntro ? (
-            <div>
-              <strong>{t('workspaceTitle')}</strong>
-              <p className="muted filters-subtitle">{t('workspaceSubtitle')}</p>
-            </div>
-          ) : null}
+        <div className="filters-topbar">
+          <div>
+            <strong>{t('workspaceTitle')}</strong>
+            <p className="muted filters-subtitle">{t('workspaceSubtitle')}</p>
+          </div>
 
           <div className="language-switch" role="group" aria-label={t('language')}>
             <button
@@ -2296,83 +2546,91 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
         </div>
 
         <div className="filter-grid">
-          <SearchableSelect
-            label={t('component')}
-            placeholder={t('componentSearchPlaceholder')}
-            emptyStateTitle={t('searchEmptyTitle')}
-            emptyStateHint={t('searchEmptyHint')}
-            options={componentOptions}
-            value={selectedComponentName}
-            searchValue={componentSearch}
-            onSearchChange={setComponentSearch}
-            onValueChange={setSelectedComponentName}
-          />
-
-          {selectedComponent?.benchmarkCount && selectedComponent.benchmarkCount > 1 ? (
-            <SearchableSelect
-              label={t('benchmark')}
-              placeholder={t('benchmarkSearchPlaceholder')}
-              emptyStateTitle={t('benchmarkSearchEmptyTitle')}
-              emptyStateHint={t('benchmarkSearchEmptyHint')}
-              options={benchmarkOptions}
-              value={selectedComponentCode}
-              searchValue={benchmarkSearch}
-              onSearchChange={setBenchmarkSearch}
-              onValueChange={setSelectedComponentCode}
-            />
-          ) : null}
-
-          <div className="control-check-row">
-            <label className="control-check control-check-inline">
-              <input type="checkbox" checked={showForecast} onChange={(event) => setShowForecast(event.target.checked)} />
-              <span>{t('showForecast')}</span>
-            </label>
-
-            <label className="control-check control-check-inline">
-              <input type="checkbox" checked={showForecastAccuracy} onChange={(event) => setShowForecastAccuracy(event.target.checked)} />
-              <span>{t('showForecastAccuracy')}</span>
-            </label>
-
-            <div
-              className={`control-block control-mode-group control-horizon-group${showForecastAccuracy ? '' : ' is-hidden'}`}
-              aria-hidden={!showForecastAccuracy}
-            >
-              <div className="control-label-with-help">
-                <span>{t('forecastHorizon')}</span>
-                <button
-                  type="button"
-                  className="control-info-button"
-                  aria-label={t('forecastAccuracyInfoLabel')}
-                  title={t('forecastAccuracyInfoLabel')}
-                  tabIndex={showForecastAccuracy ? 0 : -1}
-                >
-                  i
-                  <span className="control-info-tooltip" role="tooltip">
-                    <span>{t('forecastAccuracyInfoLine1')}</span>
-                    <span>{t('forecastAccuracyInfoLine2')}</span>
-                  </span>
-                </button>
-              </div>
-              <div className="chart-range-buttons control-mode-buttons" role="group" aria-label={t('forecastHorizon')}>
-                {FORECAST_ACCURACY_HORIZONS.map((horizon) => (
-                  <button
-                    key={horizon}
-                    type="button"
-                    className={`chart-range-button${forecastAccuracyHorizon === horizon ? ' is-active' : ''}`}
-                    aria-pressed={forecastAccuracyHorizon === horizon}
-                    disabled={!showForecastAccuracy}
-                    tabIndex={showForecastAccuracy ? 0 : -1}
-                    onClick={() => setForecastAccuracyHorizon(horizon)}
-                  >
-                    {`${horizon}M`}
-                  </button>
-                ))}
-              </div>
+          {isBenchmarkMode ? (
+            <div className="callout" role="status">
+              <strong>{selectedBenchmarkLabel}</strong>
             </div>
-          </div>
+          ) : (
+            <>
+              <SearchableSelect
+                label={t('component')}
+                placeholder={t('componentSearchPlaceholder')}
+                emptyStateTitle={t('searchEmptyTitle')}
+                emptyStateHint={t('searchEmptyHint')}
+                options={componentOptions}
+                value={selectedComponentName}
+                searchValue={componentSearch}
+                onSearchChange={setComponentSearch}
+                onValueChange={setSelectedComponentName}
+              />
+
+              {selectedComponent?.benchmarkCount && selectedComponent.benchmarkCount > 1 ? (
+                <SearchableSelect
+                  label={t('benchmark')}
+                  placeholder={t('benchmarkSearchPlaceholder')}
+                  emptyStateTitle={t('benchmarkSearchEmptyTitle')}
+                  emptyStateHint={t('benchmarkSearchEmptyHint')}
+                  options={benchmarkOptions}
+                  value={selectedComponentCode}
+                  searchValue={benchmarkSearch}
+                  onSearchChange={setBenchmarkSearch}
+                  onValueChange={setSelectedComponentCode}
+                />
+              ) : null}
+
+              <div className="control-check-row">
+                <label className="control-check control-check-inline">
+                  <input type="checkbox" checked={showForecast} onChange={(event) => setShowForecast(event.target.checked)} />
+                  <span>{t('showForecast')}</span>
+                </label>
+
+                <label className="control-check control-check-inline">
+                  <input type="checkbox" checked={showForecastAccuracy} onChange={(event) => setShowForecastAccuracy(event.target.checked)} />
+                  <span>{t('showForecastAccuracy')}</span>
+                </label>
+
+                <div
+                  className={`control-block control-mode-group control-horizon-group${showForecastAccuracy ? '' : ' is-hidden'}`}
+                  aria-hidden={!showForecastAccuracy}
+                >
+                  <div className="control-label-with-help">
+                    <span>{t('forecastHorizon')}</span>
+                    <button
+                      type="button"
+                      className="control-info-button"
+                      aria-label={t('forecastAccuracyInfoLabel')}
+                      title={t('forecastAccuracyInfoLabel')}
+                      tabIndex={showForecastAccuracy ? 0 : -1}
+                    >
+                      i
+                      <span className="control-info-tooltip" role="tooltip">
+                        <span>{t('forecastAccuracyInfoLine1')}</span>
+                        <span>{t('forecastAccuracyInfoLine2')}</span>
+                      </span>
+                    </button>
+                  </div>
+                  <div className="chart-range-buttons control-mode-buttons" role="group" aria-label={t('forecastHorizon')}>
+                    {FORECAST_ACCURACY_HORIZONS.map((horizon) => (
+                      <button
+                        key={horizon}
+                        type="button"
+                        className={`chart-range-button${forecastAccuracyHorizon === horizon ? ' is-active' : ''}`}
+                        aria-pressed={forecastAccuracyHorizon === horizon}
+                        disabled={!showForecastAccuracy}
+                        tabIndex={showForecastAccuracy ? 0 : -1}
+                        onClick={() => setForecastAccuracyHorizon(horizon)}
+                      >
+                        {`${horizon}M`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
-        {benchmarkRequired ? <p className="callout">{t('benchmarkRequired')}</p> : null}
+        {!isBenchmarkMode && benchmarkRequired ? <p className="callout">{t('benchmarkRequired')}</p> : null}
         {errorMessage ? (
           <div className="callout callout-error" role="status" aria-live="polite">
             <div>{errorMessage}</div>
@@ -2381,6 +2639,54 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
             </div>
           </div>
         ) : null}
+      </section>
+
+      <section className="panel summary-panel" style={{ gridColumn: 'span 12' }}>
+        <div className="summary-panel-main">
+          <div>
+            <p className="summary-kicker">{locale === 'pl' ? 'Podsumowanie analityczne' : 'Analytical summary'}</p>
+            <h2 className="summary-title">{selectedComponentName || t('workspaceTitle')}</h2>
+            <p className="summary-copy">{summaryBody}</p>
+          </div>
+          <div className="summary-status-row">
+            <span className={`summary-status-badge${errorMessage ? ' is-error' : isChartLoading ? ' is-loading' : ' is-ready'}`}>
+              {summaryStatusLabel}
+            </span>
+          </div>
+        </div>
+
+        <div className="summary-metrics" role="list" aria-label={locale === 'pl' ? 'Kontekst analizy' : 'Analysis context'}>
+          <div className="summary-metric" role="listitem">
+            <span className="summary-metric-label">{t('component')}</span>
+            <strong>{isBenchmarkMode ? (benchmarkSubject?.displayName ?? benchmarkSubject?.seriesId ?? t('loading')) : (selectedComponentName || t('loading'))}</strong>
+          </div>
+          <div className="summary-metric" role="listitem">
+            <span className="summary-metric-label">{t('benchmark')}</span>
+            <strong>{selectedBenchmarkLabel}</strong>
+          </div>
+          <div className="summary-metric" role="listitem">
+            <span className="summary-metric-label">{locale === 'pl' ? 'Prognoza' : 'Forecast view'}</span>
+            <strong>
+              {isBenchmarkMode
+                ? (locale === 'pl' ? 'Historyczny benchmark' : 'Historical benchmark')
+                : showForecast
+                ? hasForecastSeries
+                  ? (locale === 'pl' ? 'Aktywna z zakresem niepewności' : 'Active with uncertainty range')
+                  : (locale === 'pl' ? 'Włączona' : 'Enabled')
+                : (locale === 'pl' ? 'Wyłączona' : 'Disabled')}
+            </strong>
+          </div>
+          <div className="summary-metric" role="listitem">
+            <span className="summary-metric-label">{t('forecastAccuracy')}</span>
+            <strong>
+              {isBenchmarkMode
+                ? (locale === 'pl' ? 'Niedostępna' : 'Unavailable')
+                : showForecastAccuracy
+                ? `${locale === 'pl' ? 'Włączona' : 'Enabled'} · ${forecastAccuracyHorizon}M`
+                : (locale === 'pl' ? 'Wyłączona' : 'Disabled')}
+            </strong>
+          </div>
+        </div>
       </section>
 
       <ChartPanel
@@ -2392,7 +2698,10 @@ export function RawDataView({ showWorkspaceIntro = true }: { showWorkspaceIntro?
         loadingHint={t('loadingHint')}
         resetZoomLabel={t('resetZoom')}
         sourceLabel={t('sourceLabel')}
-        showForecastAccuracy={showForecastAccuracy}
+        showForecastAccuracy={showForecastAccuracy && !isBenchmarkMode}
+        initialPreset={isBenchmarkMode ? benchmarkRange : 'ALL'}
+        lockServerRange={isBenchmarkMode}
+        onPresetChange={isBenchmarkMode ? setBenchmarkRange : undefined}
       />
     </div>
   )
