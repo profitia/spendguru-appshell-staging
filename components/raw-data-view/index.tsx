@@ -1932,6 +1932,8 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
   const searchParams = useSearchParams()
   const benchmarkSubject = readBenchmarkSubject(searchParams)
   const isBenchmarkMode = benchmarkSubject !== null
+  const benchmarkSeriesId = benchmarkSubject?.seriesId ?? null
+  const benchmarkDisplayName = benchmarkSubject?.displayName ?? null
   const initialRange = readInitialRange(searchParams)
   const [theme, setTheme] = useState<'light' | 'dark'>('light')
   const [componentsState, setComponentsState] = useState<LoadState>('idle')
@@ -1972,7 +1974,7 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
 
   useEffect(() => {
     setBenchmarkRange(initialRange)
-  }, [initialRange, benchmarkSubject?.seriesId])
+  }, [initialRange, benchmarkSeriesId])
 
   function retryLoad() {
     setErrorMessage(null)
@@ -2069,10 +2071,12 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
 
   useEffect(() => {
     if (isBenchmarkMode) {
-      const activeBenchmarkSubject = benchmarkSubject
-      if (!activeBenchmarkSubject) {
+      if (!benchmarkSeriesId) {
         return
       }
+
+      const activeBenchmarkSeriesId = benchmarkSeriesId
+      const activeBenchmarkDisplayName = benchmarkDisplayName
 
       let cancelled = false
       seriesAbortRef.current?.abort()
@@ -2088,7 +2092,7 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
       }
 
       async function loadBenchmarkSeries() {
-        const cacheKey = buildBenchmarkSeriesCacheKey(locale, activeBenchmarkSubject.seriesId, benchmarkRange)
+        const cacheKey = buildBenchmarkSeriesCacheKey(locale, activeBenchmarkSeriesId, benchmarkRange)
         const cached = seriesCacheRef.current.get(cacheKey)
 
         if (cached && Date.now() - cached.cachedAt <= CLIENT_SERIES_CACHE_TTL_MS) {
@@ -2102,8 +2106,8 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
           if (!cancelled) {
             const renderedAt = performance.now()
             recordRawDataViewProfile({
-              componentName: activeBenchmarkSubject.displayName ?? activeBenchmarkSubject.seriesId,
-              componentCode: activeBenchmarkSubject.seriesId,
+              componentName: activeBenchmarkDisplayName ?? activeBenchmarkSeriesId,
+              componentCode: activeBenchmarkSeriesId,
               showForecast: false,
               source: 'client-cache',
               requestDispatchMs: 0,
@@ -2133,11 +2137,11 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
         try {
           const params = new URLSearchParams({
             locale,
-            seriesId: activeBenchmarkSubject.seriesId,
+            seriesId: activeBenchmarkSeriesId,
             range: benchmarkRange,
           })
-          if (activeBenchmarkSubject.displayName) {
-            params.set('displayName', activeBenchmarkSubject.displayName)
+          if (activeBenchmarkDisplayName) {
+            params.set('displayName', activeBenchmarkDisplayName)
           }
 
           const requestStartedAt = performance.now()
@@ -2173,8 +2177,8 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
           if (!cancelled) {
             const renderedAt = performance.now()
             recordRawDataViewProfile({
-              componentName: activeBenchmarkSubject.displayName ?? activeBenchmarkSubject.seriesId,
-              componentCode: activeBenchmarkSubject.seriesId,
+              componentName: activeBenchmarkDisplayName ?? activeBenchmarkSeriesId,
+              componentCode: activeBenchmarkSeriesId,
               showForecast: false,
               source: 'network',
               requestDispatchMs: requestStartedAt - interactionStartedAt,
@@ -2392,7 +2396,7 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
       cancelled = true
       controller.abort()
     }
-  }, [benchmarkRange, benchmarkRequired, effectiveComponentCode, isBenchmarkMode, locale, benchmarkSubject, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t, reloadNonce])
+  }, [benchmarkDisplayName, benchmarkRange, benchmarkRequired, benchmarkSeriesId, effectiveComponentCode, isBenchmarkMode, locale, selectedComponent?.availableBenchmarks, selectedComponentName, showForecast, t, reloadNonce])
 
   useEffect(() => {
     if (isBenchmarkMode) {
