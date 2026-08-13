@@ -1925,7 +1925,11 @@ function ChartPanel({
   )
 }
 
-export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
+type RawDataViewProps = {
+  embedded?: boolean
+}
+
+export function RawDataView({ embedded = false }: RawDataViewProps) {
   const locale = useLocale() as Locale
   const t = useTranslations('RawDataView')
   const pathname = usePathname()
@@ -2485,69 +2489,41 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
     : selectedComponent?.availableBenchmarks.find((benchmark) => benchmark.componentCode === effectiveComponentCode)?.sourceLabel
       ?? selectedComponent?.availableBenchmarks[0]?.sourceLabel
       ?? t('singleBenchmark')
-  const hasForecastSeries = activePayload?.series.some((entry) => entry.kind === 'forecast-central') ?? false
-  const hasHistoricalForecastSeries = activePayload?.series.some((entry) => entry.kind === 'historical-forecast') ?? false
-  const summaryStatusLabel = errorMessage
-    ? (locale === 'pl' ? 'Wymaga uwagi' : 'Needs attention')
-    : isChartLoading
-      ? (locale === 'pl' ? 'W przygotowaniu' : 'Preparing')
-      : (locale === 'pl' ? 'Gotowe do analizy' : 'Ready for analysis')
-  const summaryBody = errorMessage
-    ? errorMessage
-    : benchmarkRequired
-      ? t('chartNeedsBenchmark')
-      : isChartLoading
-        ? `${t('loadingTitle')} - ${t('loadingHint')}`
-        : hasForecastSeries && hasHistoricalForecastSeries
-          ? (locale === 'pl'
-            ? 'Widok łączy historię, prognozę i odczyt jakości prognozy dla wybranego benchmarku.'
-            : 'The view combines history, forecast and forecast-quality context for the selected benchmark.')
-          : hasForecastSeries
-            ? (locale === 'pl'
-              ? 'Widok zestawia historię z prognozą i zakresem niepewności dla wybranego benchmarku.'
-              : 'The view pairs historical performance with forecast and uncertainty range for the selected benchmark.')
-            : (locale === 'pl'
-              ? 'Widok koncentruje się na historii i kontekście benchmarku dla wybranego komponentu.'
-              : 'The view focuses on historical performance and benchmark context for the selected component.')
-
   return (
     <div className="shell-grid">
       <section className="panel filter-panel" style={{ gridColumn: 'span 12' }}>
-        <div className="filters-topbar">
-          <div>
-            <strong>{t('workspaceTitle')}</strong>
-            <p className="muted filters-subtitle">{t('workspaceSubtitle')}</p>
+        {embedded ? null : (
+          <div className="filters-topbar">
+            <div className="language-switch" role="group" aria-label={t('language')}>
+              <button
+                type="button"
+                className={`language-switch-button${locale === 'en' ? ' is-active' : ''}`}
+                onClick={() => window.location.assign(replaceLocaleInPath(pathname, 'en'))}
+              >
+                EN
+              </button>
+              <button
+                type="button"
+                className={`language-switch-button${locale === 'pl' ? ' is-active' : ''}`}
+                onClick={() => window.location.assign(replaceLocaleInPath(pathname, 'pl'))}
+              >
+                PL
+              </button>
+              <button
+                type="button"
+                className="language-switch-button theme-switch-button"
+                onClick={toggleTheme}
+                aria-label={t('toggleTheme')}
+                title={t('toggleTheme')}
+              >
+                <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                  <circle cx="10" cy="10" r="6.25" />
+                  <path d="M10 3.75a6.25 6.25 0 0 1 0 12.5Z" />
+                </svg>
+              </button>
+            </div>
           </div>
-
-          <div className="language-switch" role="group" aria-label={t('language')}>
-            <button
-              type="button"
-              className={`language-switch-button${locale === 'en' ? ' is-active' : ''}`}
-              onClick={() => window.location.assign(replaceLocaleInPath(pathname, 'en'))}
-            >
-              EN
-            </button>
-            <button
-              type="button"
-              className={`language-switch-button${locale === 'pl' ? ' is-active' : ''}`}
-              onClick={() => window.location.assign(replaceLocaleInPath(pathname, 'pl'))}
-            >
-              PL
-            </button>
-            <button
-              type="button"
-              className="language-switch-button theme-switch-button"
-              onClick={toggleTheme}
-              aria-label={t('toggleTheme')}
-              title={t('toggleTheme')}
-            >
-              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-                <circle cx="10" cy="10" r="6.25" />
-                <path d="M10 3.75a6.25 6.25 0 0 1 0 12.5Z" />
-              </svg>
-            </button>
-          </div>
-        </div>
+        )}
 
         <div className="filter-grid">
           {isBenchmarkMode ? (
@@ -2643,54 +2619,6 @@ export function RawDataView(_props?: { showWorkspaceIntro?: boolean }) {
             </div>
           </div>
         ) : null}
-      </section>
-
-      <section className="panel summary-panel" style={{ gridColumn: 'span 12' }}>
-        <div className="summary-panel-main">
-          <div>
-            <p className="summary-kicker">{locale === 'pl' ? 'Podsumowanie analityczne' : 'Analytical summary'}</p>
-            <h2 className="summary-title">{selectedComponentName || t('workspaceTitle')}</h2>
-            <p className="summary-copy">{summaryBody}</p>
-          </div>
-          <div className="summary-status-row">
-            <span className={`summary-status-badge${errorMessage ? ' is-error' : isChartLoading ? ' is-loading' : ' is-ready'}`}>
-              {summaryStatusLabel}
-            </span>
-          </div>
-        </div>
-
-        <div className="summary-metrics" role="list" aria-label={locale === 'pl' ? 'Kontekst analizy' : 'Analysis context'}>
-          <div className="summary-metric" role="listitem">
-            <span className="summary-metric-label">{t('component')}</span>
-            <strong>{isBenchmarkMode ? (benchmarkSubject?.displayName ?? benchmarkSubject?.seriesId ?? t('loading')) : (selectedComponentName || t('loading'))}</strong>
-          </div>
-          <div className="summary-metric" role="listitem">
-            <span className="summary-metric-label">{t('benchmark')}</span>
-            <strong>{selectedBenchmarkLabel}</strong>
-          </div>
-          <div className="summary-metric" role="listitem">
-            <span className="summary-metric-label">{locale === 'pl' ? 'Prognoza' : 'Forecast view'}</span>
-            <strong>
-              {isBenchmarkMode
-                ? (locale === 'pl' ? 'Historyczny benchmark' : 'Historical benchmark')
-                : showForecast
-                ? hasForecastSeries
-                  ? (locale === 'pl' ? 'Aktywna z zakresem niepewności' : 'Active with uncertainty range')
-                  : (locale === 'pl' ? 'Włączona' : 'Enabled')
-                : (locale === 'pl' ? 'Wyłączona' : 'Disabled')}
-            </strong>
-          </div>
-          <div className="summary-metric" role="listitem">
-            <span className="summary-metric-label">{t('forecastAccuracy')}</span>
-            <strong>
-              {isBenchmarkMode
-                ? (locale === 'pl' ? 'Niedostępna' : 'Unavailable')
-                : showForecastAccuracy
-                ? `${locale === 'pl' ? 'Włączona' : 'Enabled'} · ${forecastAccuracyHorizon}M`
-                : (locale === 'pl' ? 'Wyłączona' : 'Disabled')}
-            </strong>
-          </div>
-        </div>
       </section>
 
       <ChartPanel
