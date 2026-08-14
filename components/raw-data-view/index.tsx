@@ -1927,9 +1927,10 @@ function ChartPanel({
 
 type RawDataViewProps = {
   embedded?: boolean
+  initialBenchmarkSeries?: SeriesResponse | null
 }
 
-export function RawDataView({ embedded = false }: RawDataViewProps) {
+export function RawDataView({ embedded = false, initialBenchmarkSeries = null }: RawDataViewProps) {
   const locale = useLocale() as Locale
   const t = useTranslations('RawDataView')
   const pathname = usePathname()
@@ -2050,6 +2051,24 @@ export function RawDataView({ embedded = false }: RawDataViewProps) {
       cancelled = true
     }
   }, [isBenchmarkMode, locale, t, reloadNonce])
+
+  useEffect(() => {
+    if (!isBenchmarkMode || !benchmarkSeriesId || !initialBenchmarkSeries) {
+      return
+    }
+
+    const initialPayload = toTimeSeriesViewerPayload(initialBenchmarkSeries, locale)
+    const cacheKey = buildBenchmarkSeriesCacheKey(locale, benchmarkSeriesId, initialRange)
+    seriesCacheRef.current.set(cacheKey, {
+      response: initialBenchmarkSeries,
+      payload: initialPayload,
+      cachedAt: Date.now(),
+    })
+    setErrorMessage(null)
+    setSeries(initialBenchmarkSeries)
+    setViewerPayload(initialPayload)
+    setSeriesState('ready')
+  }, [benchmarkSeriesId, initialBenchmarkSeries, initialRange, isBenchmarkMode, locale])
 
   useEffect(() => {
     if (isBenchmarkMode) {

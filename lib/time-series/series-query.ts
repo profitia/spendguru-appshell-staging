@@ -66,6 +66,16 @@ function readBenchmarkAnalyticsRange(params: URLSearchParams): BenchmarkAnalytic
   }
 }
 
+function buildBenchmarkServerCacheKey(params: URLSearchParams, locale: 'pl' | 'en') {
+  return JSON.stringify({
+    locale,
+    mode: 'benchmark',
+    seriesId: params.get('seriesId')?.trim() ?? null,
+    range: readBenchmarkAnalyticsRange(params),
+    displayName: params.get('displayName')?.trim() ?? null,
+  })
+}
+
 function toBenchmarkSeriesResponse(
   payload: BenchmarkAnalyticsSeriesResponse,
   locale: 'pl' | 'en',
@@ -154,6 +164,13 @@ async function getBenchmarkSeries(
     throw new Error('seriesId is required for benchmark analytics mode.')
   }
 
+  const cacheKey = buildBenchmarkServerCacheKey(params, locale)
+  const cached = serverSeriesCache.get(cacheKey)
+
+  if (cached && Date.now() - cached.cachedAt <= SERVER_SERIES_CACHE_TTL_MS) {
+    return cached.payload
+  }
+
   const url = new URL('/api/benchmark/analytics-series', resolveSgRuntimeBaseUrl())
   url.searchParams.set('seriesId', seriesId)
   url.searchParams.set('range', readBenchmarkAnalyticsRange(params))
@@ -170,7 +187,15 @@ async function getBenchmarkSeries(
     throw new Error('error' in payload ? payload.error ?? 'Failed to load benchmark analytics series.' : 'Failed to load benchmark analytics series.')
   }
 
-  return toBenchmarkSeriesResponse(payload as BenchmarkAnalyticsSeriesResponse, locale, params.get('displayName'))
+  const seriesResponse = toBenchmarkSeriesResponse(payload as BenchmarkAnalyticsSeriesResponse, locale, params.get('displayName'))
+
+  serverSeriesCache.set(cacheKey, {
+    key: cacheKey,
+    cachedAt: Date.now(),
+    payload: seriesResponse,
+  })
+
+  return seriesResponse
 }
 
 type ServerSeriesCacheEntry = {
