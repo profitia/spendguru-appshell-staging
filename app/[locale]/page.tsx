@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation'
+import { unstable_noStore as noStore } from 'next/cache'
 
 import { DashboardShell } from '@/components/dashboard-shell'
 import { RawDataView } from '@/components/raw-data-view'
@@ -19,6 +20,8 @@ type LocaleHomePageProps = {
 export const dynamic = 'force-dynamic'
 
 export default async function LocaleHomePage({ params: { locale }, searchParams }: LocaleHomePageProps) {
+  noStore()
+
   const embedded = searchParams?.embed === '1'
   let initialBenchmarkSeries = null
 
